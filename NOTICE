@@ -1,0 +1,60 @@
+ARFPlayer / libarf
+Copyright (c) 2026 Ammar Qammaz
+Licensed under the MIT License -- see LICENSE.
+
+This product includes third-party and derived material, listed here so its
+provenance stays traceable.
+
+
+Dependencies
+------------
+This project vendors no third-party source.  It links, at build time, against:
+
+  libzip      https://libzip.org/          BSD-3-Clause
+              ZIP container read and write.  A system package on every target:
+              Debian/Ubuntu  libzip-dev
+              Fedora         libzip-devel
+              macOS          brew install libzip
+  zlib        (via libzip)                 zlib license
+  GLEW        (arfplay only)               BSD-3-Clause / MIT / SGI-B
+  OpenGL, libX11 (arfplay only)            system libraries; libX11 is MIT
+
+libarf itself has no dependency beyond libzip and libm, so it can be dropped
+into another project without dragging a toolchain along.
+
+
+Material from SAM3DBody-cpp
+---------------------------
+Copyright (c) Ammar Qammaz (AmmarkoV)
+MIT License.
+Upstream: https://github.com/AmmarkoV/SAM3DBody-cpp
+
+  shaders/default.vert            copied verbatim from src/render/
+  shaders/default.frag            copied verbatim from src/render/
+  tools/validate_arf.py           copied verbatim from tools/
+  doc/ARF.md                      adapted from knowledge/ARF.md, reframed from
+                                  the writer's point of view to the reader's
+
+  src/libarf/arf_skin.c           arfRecomputeNormals() is a port of
+                                  mhr_update_mesh_normals() from
+                                  src/render/mhr_pose_driver.h, with the
+                                  TRI_Model coupling replaced by plain pointers
+
+  src/libarf/arf_format.h         the byte layouts documented here were read
+                                  out of src/SAM3DBODY-cpp/arf_writer.cpp;
+                                  they are a description of that writer's
+                                  output, not copied code
+
+
+Format specification
+--------------------
+ARF is ISO/IEC 23090-39 (MPEG-I Part 39).  No specification text and no figures
+from the standard or from the overview article are reproduced anywhere in this
+repository -- the format is described in our own words and the sources cited by
+DOI.  ISO and IEEE retain copyright in their own publications regardless of
+this project's license.
+
+  J. Regateiro, A. Trioux, Q. Avril, "The MPEG Avatar Representation Format
+  (ARF): An Interoperable Container and Animation Framework for Avatars,"
+  IEEE Computer Graphics and Applications, 2026.
+  https://ieeexplore.ieee.org/document/11667221
