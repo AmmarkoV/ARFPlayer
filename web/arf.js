@@ -216,6 +216,63 @@ function readSparse(bytes, what)
     return { dims, indices: cursor.uint32s(valueCount), values: cursor.floats(valueCount) };
 }
 
+/** Decompose a row-major 4x4 affine matrix (translation in the last column)
+ *  into translation, an XYZW rotation quaternion and a non-uniform scale --
+ *  the counterpart of a Node's `transform` field, which the spec allows as
+ *  an alternative to TRS (mutually exclusive with it). Nothing downstream of
+ *  node loading consumes rest translation/rotation/scale (Pose.evaluate works
+ *  from the per-frame baked AAU matrices only), so normalizing to TRS here
+ *  costs nothing at runtime. */
+function decomposeTransform(m)
+{
+    const translation = [m[3], m[7], m[11]];
+
+    const xAxis = [m[0], m[4], m[8]];
+    const yAxis = [m[1], m[5], m[9]];
+    const zAxis = [m[2], m[6], m[10]];
+
+    const scale = [
+        Math.hypot(xAxis[0], xAxis[1], xAxis[2]),
+        Math.hypot(yAxis[0], yAxis[1], yAxis[2]),
+        Math.hypot(zAxis[0], zAxis[1], zAxis[2]),
+    ];
+
+    const sx = scale[0] > 1e-8 ? 1 / scale[0] : 0;
+    const sy = scale[1] > 1e-8 ? 1 / scale[1] : 0;
+    const sz = scale[2] > 1e-8 ? 1 / scale[2] : 0;
+
+    /* Orthonormalized 3x3 rotation, rRC = row R, column C. */
+    const r00 = xAxis[0]*sx, r10 = xAxis[1]*sx, r20 = xAxis[2]*sx;
+    const r01 = yAxis[0]*sy, r11 = yAxis[1]*sy, r21 = yAxis[2]*sy;
+    const r02 = zAxis[0]*sz, r12 = zAxis[1]*sz, r22 = zAxis[2]*sz;
+
+    const trace = r00 + r11 + r22;
+    let qx, qy, qz, qw, s;
+
+    if (trace > 0)
+    {
+        s = Math.sqrt(trace + 1) * 2;
+        qw = 0.25*s; qx = (r21-r12)/s; qy = (r02-r20)/s; qz = (r10-r01)/s;
+    }
+    else if (r00 > r11 && r00 > r22)
+    {
+        s = Math.sqrt(1 + r00 - r11 - r22) * 2;
+        qw = (r21-r12)/s; qx = 0.25*s; qy = (r01+r10)/s; qz = (r02+r20)/s;
+    }
+    else if (r11 > r22)
+    {
+        s = Math.sqrt(1 + r11 - r00 - r22) * 2;
+        qw = (r02-r20)/s; qx = (r01+r10)/s; qy = 0.25*s; qz = (r12+r21)/s;
+    }
+    else
+    {
+        s = Math.sqrt(1 + r22 - r00 - r11) * 2;
+        qw = (r10-r01)/s; qx = (r02+r20)/s; qy = (r12+r21)/s; qz = 0.25*s;
+    }
+
+    return { translation, rotation: [qx, qy, qz, qw], scale };
+}
+
 /** Walk an animation stream, yielding one unit at a time.
  *
  *  Unknown unit types are handed back like any other; skipping them is the
@@ -262,6 +319,10 @@ class Avatar
         {
             throw new Error('preamble.signature is "' + document.preamble.signature + '", expected "ARF"');
         }
+        if (!(document.structure.assets || []).length)
+        {
+            throw new Error('structure.assets is empty or missing');
+        }
 
         return new Avatar(document, files);
     }
@@ -291,31 +352,47 @@ class Avatar
         this.name = document.metadata.name || 'avatar';
         this.id   = document.metadata.id   || '0';
 
-        /* -- skeleton -- */
+        /* -- skeleton --
+         * Numeric ids: components.nodes[i].id == i, this library's own
+         * convention (matches src/libarf/arf_reader.c). parent/root/joints
+         * are indices, so resolution is a bounds check, not a name lookup. */
         const nodes = components.nodes || [];
         if (nodes.length === 0) { throw new Error('components.nodes is empty or missing'); }
 
-        const indexOf = new Map(nodes.map((n, i) => [n.id, i]));
         this.nodes = nodes.map((node, i) =>
         {
+            if (node.id !== i) { throw new Error('components.nodes[' + i + '] has id ' + node.id + ', expected ' + i); }
+
             let parent = -1;
             if (node.parent !== undefined)
             {
-                if (!indexOf.has(node.parent))
+                parent = node.parent;
+                if (parent < 0 || parent >= nodes.length)
                 {
-                    throw new Error('node "' + node.id + '" names a parent "' + node.parent + '" that is not in components.nodes');
+                    throw new Error('node "' + node.name + '" has parent ' + parent + ', which is not a valid node index');
                 }
-                parent = indexOf.get(node.parent);
 
                 /* Depended on by composeGlobals, which is a single forward
                  * pass, and it rules out cycles for free. */
                 if (parent >= i)
                 {
-                    throw new Error('node "' + node.id + '" at index ' + i + ' has a parent at index ' + parent +
+                    throw new Error('node "' + node.name + '" at index ' + i + ' has a parent at index ' + parent +
                                     ' — parents must be listed before their children');
                 }
             }
-            return { id: node.id, parent, translation: node.translation || [0,0,0], rotation: node.rotation || [0,0,0,1] };
+
+            if (node.transform)
+            {
+                const trs = decomposeTransform(node.transform);
+                return { id: i, name: node.name, parent, ...trs };
+            }
+
+            return {
+                id: i, name: node.name, parent,
+                translation: node.translation || [0,0,0],
+                rotation: node.rotation || [0,0,0,1],
+                scale: node.scale || [1,1,1],
+            };
         });
 
         const roots = this.nodes.map((n, i) => n.parent < 0 ? i : -1).filter(i => i >= 0);
@@ -332,20 +409,30 @@ class Avatar
         {
             throw new Error('skeleton lists ' + joints.length + ' joints but components.nodes has ' + this.nodes.length);
         }
-        joints.forEach((name, i) =>
+        joints.forEach((id, i) =>
         {
-            if (name !== this.nodes[i].id)
+            if (id !== i)
             {
-                throw new Error('skeleton joint ' + i + ' is "' + name + '" but components.nodes[' + i + '] is "' + this.nodes[i].id + '"');
+                throw new Error('skeleton joint ' + i + ' is node id ' + id + ', but AAU joint indices assume this list ' +
+                                'agrees with components.nodes order -- the two orders must agree');
             }
         });
+        if (skeleton.root !== this.rootNode)
+        {
+            throw new Error('skeleton root is node id ' + skeleton.root + ' but the parentless node is "' +
+                            this.nodes[this.rootNode].name + '" (id ' + this.rootNode + ')');
+        }
 
-        /* -- mesh -- */
+        /* -- mesh --
+         * Mesh.data is [positionsDataId, indicesDataId], this library's own
+         * documented convention -- the spec text available here does not
+         * pin down what each slot means beyond "mesh data". */
         const mesh = (components.meshes || [])[0];
         if (!mesh) { throw new Error('components.meshes is empty or missing'); }
+        if (!mesh.data || mesh.data.length < 2) { throw new Error('mesh.data must list at least 2 data items (positions, indices)'); }
 
-        const positions = readDense(entry(mesh.positions, 'mesh positions'), 'mesh positions');
-        const indices   = readDense(entry(mesh.indices,   'mesh indices'),   'mesh indices');
+        const positions = readDense(entry(mesh.data[0], 'mesh.data[0] (positions)'), 'mesh positions');
+        const indices   = readDense(entry(mesh.data[1], 'mesh.data[1] (indices)'),   'mesh indices');
 
         this.numberOfVertices  = positions.dims[0];
         this.numberOfTriangles = indices.dims[0];
@@ -361,17 +448,19 @@ class Avatar
         }
 
         /* -- skin -- */
-        const skin = (components.skins || []).find(s => s.id === mesh.skin) || (components.skins || [])[0];
-        if (!skin) { throw new Error('the mesh references a skin that is not in components.skins'); }
+        const skin = (components.skins || [])[0];
+        if (!skin) { throw new Error('components.skins is empty or missing'); }
+        if (skin.mesh !== 0) { throw new Error('skins[0].mesh is ' + skin.mesh + ', expected 0 -- one mesh, one skin'); }
+        if (skin.skeleton !== 0) { throw new Error('skins[0].skeleton is ' + skin.skeleton + ', expected 0 -- one skeleton'); }
 
-        const weights = readSparse(entry(skin.weights, 'skin weights'), 'skin weights');
+        const weights = readSparse(entry(skin.weights, 'skin.weights'), 'skin weights');
         if (weights.dims[0] !== this.numberOfVertices || weights.dims[1] !== this.nodes.length)
         {
             throw new Error('skin weights cover [' + weights.dims + '] but the mesh/skeleton are [' +
                             this.numberOfVertices + ',' + this.nodes.length + ']');
         }
 
-        const inverseBind = readDense(entry(skeleton.inverseBindMatrices, 'inverse bind matrices'), 'inverse bind matrices');
+        const inverseBind = readDense(entry(skeleton.inverseBindMatrix, 'skeleton.inverseBindMatrix'), 'inverse bind matrices');
         if (inverseBind.dims[0] !== this.nodes.length || inverseBind.dims[1] !== 16)
         {
             throw new Error('inverse bind matrices must be a [' + this.nodes.length + ',16] tensor');
@@ -380,9 +469,11 @@ class Avatar
 
         this.buildSkinIndex(weights);
 
-        /* -- animation -- */
-        const stream = (document.structure.animationStreams || []).find(s => s.frameworks === 'arf-body-v1');
-        const streamBytes = files.get(stream ? stream.uri : 'animations/joints.bin');
+        /* -- animation --
+         * The spec has no arf.json field naming the animation stream's
+         * location for a Zip container; it is found by the fixed path the
+         * container-format clause locates it at. */
+        const streamBytes = files.get('animations/joints.bin');
         if (!streamBytes) { throw new Error('the joint animation stream is missing'); }
 
         this.readJointStream(streamBytes);

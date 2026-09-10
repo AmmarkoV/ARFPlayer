@@ -13,29 +13,35 @@ The executable version of this document is
 layout below appears there, and that file is the one to diff when a container
 stops loading.
 
-## What this is not
+## Conformance status
 
-ARF is ISO/IEC 23090-39 (MPEG-I Part 39), at FDIS stage as of writing. The
-writer that produces these containers was designed against the published
-system-level overview article, **not** the FDIS bitstream-syntax text:
+ARF is ISO/IEC 23090-39 (MPEG-I Part 39). `libarf`'s `arf.json` component
+graph — numeric ids/indices, `structure` as Asset/LOD — has been checked
+against the FDIS-stage text and matches it; see
+[`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting of
+what was changed and why. Still outstanding, and still this project's own
+convention rather than verified spec values: the AAU bitstream's numeric
+type codes and field widths, the sparse skin-weight tensor (the spec only
+defines a dense one), and `BlendshapeSet.shapes` as one combined raw delta
+tensor rather than per-shape embedded GLB targets.
+
+This container format traces back to
+[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)'s `ARFWriter`,
+which was originally designed against the published system-level overview
+article rather than the bitstream-syntax text:
 
 > J. Regateiro, A. Trioux, Q. Avril, "The MPEG Avatar Representation Format
 > (ARF): An Interoperable Container and Animation Framework for Avatars,"
 > *IEEE Computer Graphics and Applications*, 2026.
 > <https://ieeexplore.ieee.org/document/11667221>
 
-The article pins down the JSON document's top-level structure, the container
-options, and the shape of the animation stream format at a level sufficient to
-design against. Where it does not pin down an exact bit layout, the writer made
-its own explicit choice. Those choices — the AAU numeric type codes, the
-config unit's field list, a byte-aligned rather than 7-bit-packed `unit_type`,
-raw dense tensors instead of embedded GLB blendshape targets — are **that
-project's convention, not verified spec values**.
-
-So: this library reads SAM3DBody-flavoured ARF. `tools/validate_arf.py`, copied
-here from the writer's repository, is the authoritative description of what the
-writer actually emits and the numeric oracle this implementation is checked
-against.
+`tools/validate_arf.py`, copied here unchanged from that project, validates
+containers in the *original* SAM3DBody-flavoured shape (string component ids,
+`structure.animationStreams`) and is no longer a match for what `libarf`
+itself reads and writes as of the numeric-id rewrite — it stays useful as a
+record of what the upstream writer emits today, not as this library's own
+oracle. `doc/CONFORMANCE_GAPS.md` lists what `ARFWriter` would need to change
+to produce containers this library reads conformantly.
 
 No specification text or figures are reproduced here. ISO and IEEE retain
 copyright in their own publications regardless of this project's license.
@@ -48,6 +54,7 @@ little-endian.
 ```
 <stem>_<id>.arfz
 ├── arf.json                    the base avatar model
+├── id_map.txt                  non-normative id -> name debug index, see below
 ├── data/
 │   ├── mesh_positions.bin      dense  [n_verts, 3]            float32
 │   ├── mesh_indices.bin        dense  [n_tris, 3]             uint32
@@ -69,40 +76,63 @@ take them from the file, never hardcode them.
 Five top-level keys, all mandatory: `preamble`, `metadata`, `structure`,
 `components`, `data`.
 
+Every component's numeric `id` is its index within its own
+`components.<array>` — `components.nodes[i].id == i`, and so on for
+skeletons, skins, meshes and blendshape sets. This library only ever holds
+one mesh/skin/skeleton/blendshape set, so those always get id `0`; `Node.id`
+matches AAU `jointIndex` values one for one. Every component still carries
+its own human-readable `name` string alongside its numeric `id`.
+
 ```
 preamble:  { signature: "ARF", version: "1.0",
              supportedAnimations: ["arf-body-v1", ("arf-face-v1")] }
 
 metadata:  { name: <string>, id: <string> }
 
-structure.animationStreams: [
-  { id: "body_joints",     uri: "animations/joints.bin", frameworks: "arf-body-v1" },
-  { id: "face_expression", uri: "animations/face.bin",   frameworks: "arf-face-v1" }  // optional
+structure.assets: [
+  { name: "body", isMain: true,
+    lods: [ { name: "lod0", skins: [0], meshes: [0], skeletons: [0], (blendshapeSets: [0]) } ] }
 ]
+// No field names the animation streams' location -- animations/joints.bin
+// and animations/face.bin are found by fixed path, see "Avatar Animation
+// Units" below.
 
-components.nodes: [ { id: <joint name>,
-                      parent: <joint name>,     // absent on the root only
-                      translation: [x,y,z],     // rest, parent-relative, centimetres
-                      rotation: [x,y,z,w] } ]   // rest, XYZW
+components.nodes: [ { id: 0, name: <joint name>, mapping: <semantic path>,
+                      parent: <node id>,         // absent on the root only
+                      translation: [x,y,z],       // rest, parent-relative, centimetres -- optional
+                      rotation: [x,y,z,w],        // rest, XYZW -- optional
+                      scale: [x,y,z] } ]          // rest, non-uniform -- optional, default [1,1,1]
+                    // translation/rotation/scale may instead be replaced by a
+                    // single "transform": [16 numbers], mutually exclusive with them
 
-components.skeletons: [ { id: "skeleton0", root: <root joint name>,
-                          joints: [<names, in node order>],
-                          inverseBindMatrices: "inverse_bind_matrices" } ]
+components.skeletons: [ { id: 0, name: "skeleton0", root: <root node id>,
+                          joints: [<node ids, in node order>],
+                          inverseBindMatrix: <data id> } ]
 
-components.skins:     [ { id: "skin0", skeleton: "skeleton0", weights: "skin_weights" } ]
+components.skins:     [ { id: 0, name: "skin0", mapping: <path>,
+                          skeleton: 0, mesh: 0, weights: <data id> } ]
 
-components.meshes:    [ { id: "mesh0", positions: "mesh_positions",
-                          indices: "mesh_indices", skin: "skin0" } ]
+components.meshes:    [ { id: 0, name: "mesh0", path: <path>,
+                          data: [<positions data id>, <indices data id>] } ]
 
-components.blendshapeSets: [ { id: "face_expression", baseMesh: "mesh0",
-                               count: <n>, deltas: "face_blendshape_deltas" } ]  // optional
+components.blendshapeSets: [ { id: 0, name: "face_expression", baseMesh: 0,
+                               shapes: [<data id>] } ]  // optional
 
-data: [ { id, uri, mimeType, byteLength } ]
+data: [ { id: <number>, name: <string>, uri, type, byteLength } ]
 ```
 
-`mimeType` is `application/mpeg.arf.dense` or `application/mpeg.arf.sparse`
-(the writer's convention). Component references such as `"mesh_positions"`
-resolve against `data[].id`, and the entry's `uri` names the ZIP entry.
+`type` is `application/mpeg.arf.dense` or `application/mpeg.arf.sparse` (the
+sparse one is this project's own extension — see "Sparse tensor" below).
+Component references such as a `weights` or `inverseBindMatrix` field are
+numbers that resolve against `data[].id`, and the entry's `uri` names the ZIP
+entry.
+
+`mesh.data`'s slot order (`[0]`=positions, `[1]`=indices) and `node.mapping`/
+`skin.mapping`/`mesh.path` (this project has no verified taxonomy for the
+semantic scene-graph paths the spec's companion scene-description part
+defines, so a node's own name is used as an honest placeholder) are this
+library's own documented convention — see `arf_format.h` and
+`doc/CONFORMANCE_GAPS.md`.
 
 ### What a reader must check
 
@@ -112,9 +142,11 @@ error, which is why `libarf` verifies all of them at load time:
 * **`data[].byteLength` against the real entry size.** A mismatch means the
   JSON and the binaries came from different runs.
 * **Every component reference resolves**, and every `uri` exists in the ZIP.
+* **Every node's `id` equals its index**, and every reference to a node
+  (`parent`, `skeletons[0].root`, `skeletons[0].joints`) is a valid index.
 * **Exactly one node has no `parent`**, and it is the one `skeletons[0].root`
   names.
-* **`skeletons[0].joints` is the same list, in the same order, as
+* **`skeletons[0].joints` is `[0, 1, 2, ...]`, the same order as
   `components.nodes`.** AAU `jointIndex` values index this list positionally,
   so if the two ever disagree every joint drives the wrong bone, silently.
 * **Every parent precedes its child** in the node list. The writer emits the
@@ -266,6 +298,15 @@ container, so `.arfz` files still carry the raw frames.
 `libarf` offers the same repair as `arfDespikeFrames()`, opt-in — a reader that
 silently rewrote the animation it was asked to read would be worse than one
 that shows the glitch.
+
+## `id_map.txt` (non-normative)
+
+A flat `<type>\t<id>\t<name>` line per component (`node`, `mesh`, `skin`,
+`skeleton`, `blendshapeSet`), so a raw `AAU_JOINT` stream's numeric joint
+indices can be matched to a name without a JSON parser. Every component
+already carries its own mandatory `name` in `arf.json` — this is purely a
+debugging convenience, never referenced from `data[]`/`structure`/
+`components`, and a conformant reader has no reason to open it.
 
 ## Not in the format as emitted
 

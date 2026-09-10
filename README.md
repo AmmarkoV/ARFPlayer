@@ -15,24 +15,27 @@ and C++ bindings that wrap the same C API without copying anything.
 
 > **Where do `.arfz` files come from?** Convert a video or a live webcam to ARF
 > with **[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)** — run it
-> with `--arf out.arfz` and it writes one container per tracked person. That is
-> the producer this player reads.
+> with `--arf out.arfz` and it writes one container per tracked person.
+> **That project's writer has not yet been updated to the numeric-id shape
+> below**, so its current output will not load here until it is — see
+> [doc/CONFORMANCE_GAPS.md](doc/CONFORMANCE_GAPS.md).
 
-## ⚠ Not a conformant ARF implementation
+## ⚠ Not yet a fully conformant ARF implementation
 
-This reads and writes **SAM3DBody-flavoured ARF**, matching the writer in
-[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp). That writer was
-designed against the published overview article, not against the FDIS
-bitstream-syntax text of ISO/IEC 23090-39. Several details are that project's
-own convention rather than verified spec values:
+`arf.json`'s component graph — numeric ids/indices, `structure` as
+Asset/LOD — has been checked against the FDIS-stage text of ISO/IEC 23090-39
+and matches it. Still this project's own convention rather than verified
+spec values:
 
-* the AAU numeric type codes,
-* a byte-aligned `unit_type` instead of the spec's 7-bit-packed field,
+* the AAU bitstream's numeric type codes and field widths,
+* the sparse skin-weight tensor (the spec only defines a dense one),
 * raw dense tensors in place of embedded GLB blendshape targets.
 
 Everything this library assumes about the bytes is written down in one place,
 [`src/libarf/arf_format.h`](src/libarf/arf_format.h), so there is a single file
-to diff when the format moves. Do not treat this as a conformance reference.
+to diff when the format moves. The full accounting of what changed and what's
+still open is [doc/CONFORMANCE_GAPS.md](doc/CONFORMANCE_GAPS.md); do not treat
+this README as a conformance reference on its own.
 
 The format is ISO/IEC 23090-39 (MPEG-I Part 39). The design is based on:
 J. Regateiro, A. Trioux, Q. Avril, *The MPEG Avatar Representation Format
@@ -104,7 +107,7 @@ skeleton never exceeds 37°/frame — so it plays through without any repair. Se
 Non-interactive modes:
 
 ```bash
-./build/arfplay --info       samples/summerlove_0.arfz   # summary, matching validate_arf.py
+./build/arfplay --info       samples/summerlove_0.arfz   # summary
 ./build/arfplay --export-obj rest.obj  samples/summerlove_0.arfz
 ./build/arfplay --export-obj f100.obj --frame 100 samples/summerlove_0.arfz
 ./build/arfplay --save copy.arfz samples/summerlove_0.arfz   # re-encode, for round trip checks
@@ -318,14 +321,14 @@ error.
 
 ## Verifying
 
-`tools/validate_arf.py` is the reference reader from the writer's repository,
-carried here unchanged as a numeric oracle. Its output should match
-`arfplay --info` figure for figure.
-
-```bash
-python3 tools/validate_arf.py samples/summerlove_0.arfz
-./build/arfplay --info       samples/summerlove_0.arfz
-```
+`tools/validate_arf.py` is the reference reader from SAM3DBody-cpp, carried
+here unchanged. It validates the **original** SAM3DBody-flavoured shape
+(string component ids, `structure.animationStreams`) and no longer matches
+what this library itself reads or writes since the numeric-id rewrite — see
+[doc/CONFORMANCE_GAPS.md](doc/CONFORMANCE_GAPS.md). It stays useful as a
+record of what that project's writer emits today, not as this library's own
+oracle; `arfplay --info` / `--save` round trips are the check that matters
+now (see [Using the player](#using-the-player) above).
 
 `tools/mutate_arf.py` builds broken containers out of a good one — truncated
 ZIP, malformed JSON, a missing top-level key, a `byteLength` that disagrees
@@ -357,7 +360,7 @@ bindings/          python/arf.py (ctypes) and cpp/arf.hpp (header-only)
 web/               a dependency-free browser player: arf.js reads, player.js draws
 shaders/           the body shaders, copied unchanged from the pipeline
 examples/          arfinfo.cpp (C++ binding) and write_avatar.py (Python write path)
-tools/             validate_arf.py (oracle) and mutate_arf.py (robustness)
+tools/             validate_arf.py (SAM3DBody-cpp's own oracle, pre-rewrite shape) and mutate_arf.py (robustness)
 samples/           summerlove_0.arfz, the committed container every example uses
 ```
 

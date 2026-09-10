@@ -333,10 +333,10 @@ public:
 
     // -- writing -----------------------------------------------------------
 
-    void set_node(unsigned int index, const std::string &id, int parent,
+    void set_node(unsigned int index, const std::string &name, int parent,
                   const float *translation = nullptr, const float *rotation = nullptr)
     {
-        detail::check(arfSetNode(avatar_, index, id.c_str(), parent, translation, rotation),
+        detail::check(arfSetNode(avatar_, index, name.c_str(), parent, translation, rotation),
                       "setting a node");
     }
 

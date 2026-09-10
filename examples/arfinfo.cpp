@@ -27,7 +27,7 @@ int main(int argc, char **argv)
 
         std::cout << avatar.name() << " (" << avatar.id() << ")\n"
                   << "  " << avatar.node_count()     << " joints, root \""
-                           << avatar.node(avatar.root_node()).id << "\"\n"
+                           << avatar.node(avatar.root_node()).name << "\"\n"
                   << "  " << avatar.vertex_count()   << " vertices, "
                            << avatar.triangle_count() << " triangles, "
                            << avatar.weight_count()   << " skin weights\n"

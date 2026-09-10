@@ -176,18 +176,18 @@ static int arfAAUNext(struct arfCursor *cursor, struct arfAAUUnit *unit)
  *  arf.json component resolution
  * =========================================================================*/
 
-/** @brief Resolve a component reference (a data[].id) to its ZIP entry name.
- *  @retval the uri, or 0 if the id is not listed */
-static const char *arfResolveDataURI(const struct arfJsonValue *dataArray, const char *id)
+/** @brief Resolve a component reference (a data[].id, numeric) to its ZIP
+ *  entry name.  @retval the uri, or 0 if the id is not listed */
+static const char *arfResolveDataURI(const struct arfJsonValue *dataArray, int id)
 {
-    if (id==0) { return 0; }
+    if (id < 0) { return 0; }
 
     for (unsigned int i=0; i<arfJsonCount(dataArray); i++)
     {
         const struct arfJsonValue *item = arfJsonAt(dataArray,i);
-        const char *itemId = arfJsonString(arfJsonMember(item,"id"),0);
+        const struct arfJsonValue *itemId = arfJsonMember(item,"id");
 
-        if ( (itemId!=0) && (strcmp(itemId,id)==0) )
+        if ( (itemId!=0) && ((int) arfJsonNumber(itemId,-1.0) == id) )
         {
             return arfJsonString(arfJsonMember(item,"uri"),0);
         }
@@ -203,13 +203,13 @@ static int arfValidateDataItems(zip_t *archive, const struct arfJsonValue *dataA
     for (unsigned int i=0; i<arfJsonCount(dataArray); i++)
     {
         const struct arfJsonValue *item = arfJsonAt(dataArray,i);
-        const char *id  = arfJsonString(arfJsonMember(item,"id"),"?");
+        int         id  = (int) arfJsonNumber(arfJsonMember(item,"id"),-1.0);
         const char *uri = arfJsonString(arfJsonMember(item,"uri"),0);
 
-        if (uri==0) { arfSetError("data item \"%s\" has no uri",id); return 0; }
+        if (uri==0) { arfSetError("data item %d has no uri",id); return 0; }
 
         zip_int64_t actual = arfEntrySize(archive,uri);
-        if (actual < 0) { arfSetError("data item \"%s\" points at missing entry \"%s\"",id,uri); return 0; }
+        if (actual < 0) { arfSetError("data item %d points at missing entry \"%s\"",id,uri); return 0; }
 
         const struct arfJsonValue *declared = arfJsonMember(item,"byteLength");
         if (declared!=0)
@@ -217,7 +217,7 @@ static int arfValidateDataItems(zip_t *archive, const struct arfJsonValue *dataA
             unsigned long long expected = (unsigned long long) arfJsonNumber(declared,-1.0);
             if (expected != (unsigned long long) actual)
             {
-                arfSetError("data item \"%s\": byteLength %llu does not match the %llu bytes in \"%s\"",
+                arfSetError("data item %d: byteLength %llu does not match the %llu bytes in \"%s\"",
                             id,expected,(unsigned long long) actual,uri);
                 return 0;
             }
@@ -226,19 +226,67 @@ static int arfValidateDataItems(zip_t *archive, const struct arfJsonValue *dataA
     return 1;
 }
 
-/** @brief Find a node by id.  @retval its index, or -1 */
-static int arfFindNode(const struct arfAvatar *avatar, const char *id)
+/** @brief Decompose a row-major 4x4 affine matrix (translation in the last
+ *  column) into translation, an XYZW rotation quaternion and a non-uniform
+ *  scale -- the reader-side counterpart of a Node's `transform` field, which
+ *  the spec allows as an alternative to TRS (mutually exclusive with it).
+ *  Nothing downstream of node loading consumes rest translation/rotation/
+ *  scale at all (arfComposeGlobals works from the per-frame baked AAU
+ *  matrices only), so normalizing to TRS here costs nothing at runtime. */
+static void arfDecomposeTransform(const float *m, float *translation, float *rotation, float *scale)
 {
-    if (id==0) { return -1; }
+    translation[0] = m[3];
+    translation[1] = m[7];
+    translation[2] = m[11];
 
-    for (unsigned int i=0; i<avatar->numberOfNodes; i++)
+    float xAxis[3] = { m[0], m[4], m[8]  };
+    float yAxis[3] = { m[1], m[5], m[9]  };
+    float zAxis[3] = { m[2], m[6], m[10] };
+
+    scale[0] = sqrtf(xAxis[0]*xAxis[0] + xAxis[1]*xAxis[1] + xAxis[2]*xAxis[2]);
+    scale[1] = sqrtf(yAxis[0]*yAxis[0] + yAxis[1]*yAxis[1] + yAxis[2]*yAxis[2]);
+    scale[2] = sqrtf(zAxis[0]*zAxis[0] + zAxis[1]*zAxis[1] + zAxis[2]*zAxis[2]);
+
+    float sx = (scale[0] > 1e-8f) ? 1.0f/scale[0] : 0.0f;
+    float sy = (scale[1] > 1e-8f) ? 1.0f/scale[1] : 0.0f;
+    float sz = (scale[2] > 1e-8f) ? 1.0f/scale[2] : 0.0f;
+
+    /* Orthonormalized 3x3 rotation, rRC = row R, column C. */
+    float r00=xAxis[0]*sx, r10=xAxis[1]*sx, r20=xAxis[2]*sx;
+    float r01=yAxis[0]*sy, r11=yAxis[1]*sy, r21=yAxis[2]*sy;
+    float r02=zAxis[0]*sz, r12=zAxis[1]*sz, r22=zAxis[2]*sz;
+
+    float trace = r00 + r11 + r22;
+    float qx,qy,qz,qw,s;
+
+    if (trace > 0.0f)
     {
-        if (strcmp(avatar->nodes[i].id,id)==0) { return (int) i; }
+        s = sqrtf(trace+1.0f) * 2.0f;
+        qw = 0.25f*s;  qx = (r21-r12)/s;  qy = (r02-r20)/s;  qz = (r10-r01)/s;
     }
-    return -1;
+    else if ( (r00>r11) && (r00>r22) )
+    {
+        s = sqrtf(1.0f+r00-r11-r22) * 2.0f;
+        qw = (r21-r12)/s;  qx = 0.25f*s;  qy = (r01+r10)/s;  qz = (r02+r20)/s;
+    }
+    else if (r11>r22)
+    {
+        s = sqrtf(1.0f+r11-r00-r22) * 2.0f;
+        qw = (r02-r20)/s;  qx = (r01+r10)/s;  qy = 0.25f*s;  qz = (r12+r21)/s;
+    }
+    else
+    {
+        s = sqrtf(1.0f+r22-r00-r11) * 2.0f;
+        qw = (r10-r01)/s;  qx = (r02+r20)/s;  qy = (r12+r21)/s;  qz = 0.25f*s;
+    }
+
+    rotation[0]=qx; rotation[1]=qy; rotation[2]=qz; rotation[3]=qw;
 }
 
-/** @brief Read components.nodes into the avatar and resolve the hierarchy. */
+/** @brief Read components.nodes into the avatar and resolve the hierarchy.
+ *  Ids are numeric (components.nodes[i].id == i, this library's own
+ *  convention), so parent/root/joints resolution is a bounds check, not a
+ *  name lookup. */
 static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *components)
 {
     const struct arfJsonValue *nodes = arfJsonMember(components,"nodes");
@@ -250,62 +298,76 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
     if (avatar->nodes==0) { arfSetError("out of memory allocating %u nodes",count); return 0; }
     avatar->numberOfNodes = count;
 
-    /* Pass one records the ids, so that pass two can resolve parents by name
-     * regardless of the order the parents appear in. */
-    for (unsigned int i=0; i<count; i++)
-    {
-        const struct arfJsonValue *node = arfJsonAt(nodes,i);
-        const char *id = arfJsonString(arfJsonMember(node,"id"),0);
-
-        if (id==0) { arfSetError("components.nodes[%u] has no id",i); return 0; }
-        if (strlen(id) >= ARF_MAX_NAME)
-        {
-            arfSetError("components.nodes[%u] id \"%s\" is longer than the %d character limit",
-                        i,id,ARF_MAX_NAME-1);
-            return 0;
-        }
-
-        strcpy(avatar->nodes[i].id,id);
-        avatar->nodes[i].parent = -1;
-        avatar->nodes[i].rotation[3] = 1.0f;
-    }
-
     int rootCount = 0;
     for (unsigned int i=0; i<count; i++)
     {
         const struct arfJsonValue *node = arfJsonAt(nodes,i);
         struct arfNode *destination = &avatar->nodes[i];
 
-        const char *parent = arfJsonString(arfJsonMember(node,"parent"),0);
+        int id = (int) arfJsonNumber(arfJsonMember(node,"id"),-1.0);
+        if (id != (int) i)
+        {
+            arfSetError("components.nodes[%u] has id %d, expected %u",i,id,i);
+            return 0;
+        }
+
+        const char *name = arfJsonString(arfJsonMember(node,"name"),0);
+        if (name==0) { arfSetError("components.nodes[%u] has no name",i); return 0; }
+        if (strlen(name) >= ARF_MAX_NAME)
+        {
+            arfSetError("components.nodes[%u] name \"%s\" is longer than the %d character limit",
+                        i,name,ARF_MAX_NAME-1);
+            return 0;
+        }
+        strcpy(destination->name,name);
+
+        const struct arfJsonValue *parent = arfJsonMember(node,"parent");
         if (parent==0)
         {
+            destination->parent = -1;
             avatar->rootNode = i;
             rootCount++;
         }
         else
         {
-            destination->parent = arfFindNode(avatar,parent);
-            if (destination->parent < 0)
+            destination->parent = (int) arfJsonNumber(parent,-1.0);
+            if ( (destination->parent < 0) || (destination->parent >= (int) count) )
             {
-                arfSetError("node \"%s\" names a parent \"%s\" that is not in components.nodes",
-                            destination->id,parent);
+                arfSetError("node \"%s\" has parent %d, which is not a valid node index",
+                            destination->name,destination->parent);
                 return 0;
             }
         }
 
-        const struct arfJsonValue *translation = arfJsonMember(node,"translation");
-        for (unsigned int c=0; c<3; c++)
+        const struct arfJsonValue *transform = arfJsonMember(node,"transform");
+        if (transform!=0)
         {
-            destination->translation[c] = (float) arfJsonNumber(arfJsonAt(translation,c),0.0);
+            /* Alternative to TRS, mutually exclusive with it -- decompose to
+             * the canonical TRS this library stores. */
+            float matrix[16];
+            for (unsigned int c=0; c<16; c++) { matrix[c] = (float) arfJsonNumber(arfJsonAt(transform,c),0.0); }
+            arfDecomposeTransform(matrix,destination->translation,destination->rotation,destination->scale);
         }
-
-        const struct arfJsonValue *rotation = arfJsonMember(node,"rotation");
-        if (rotation!=0)
+        else
         {
+            const struct arfJsonValue *translation = arfJsonMember(node,"translation");
+            for (unsigned int c=0; c<3; c++)
+            {
+                destination->translation[c] = (float) arfJsonNumber(arfJsonAt(translation,c),0.0);
+            }
+
+            const struct arfJsonValue *rotation = arfJsonMember(node,"rotation");
             /* XYZW, not WXYZ -- see the conventions note in arf.h. */
             for (unsigned int c=0; c<4; c++)
             {
-                destination->rotation[c] = (float) arfJsonNumber(arfJsonAt(rotation,c),(c==3)?1.0:0.0);
+                destination->rotation[c] = (rotation!=0)
+                    ? (float) arfJsonNumber(arfJsonAt(rotation,c),(c==3)?1.0:0.0) : ((c==3)?1.0f:0.0f);
+            }
+
+            const struct arfJsonValue *scale = arfJsonMember(node,"scale");
+            for (unsigned int c=0; c<3; c++)
+            {
+                destination->scale[c] = (scale!=0) ? (float) arfJsonNumber(arfJsonAt(scale,c),1.0) : 1.0f;
             }
         }
     }
@@ -327,7 +389,7 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
         {
             arfSetError("node \"%s\" at index %u has parent \"%s\" at index %d -- "
                         "parents must be listed before their children",
-                        avatar->nodes[i].id,i,avatar->nodes[avatar->nodes[i].parent].id,
+                        avatar->nodes[i].name,i,avatar->nodes[avatar->nodes[i].parent].name,
                         avatar->nodes[i].parent);
             return 0;
         }
@@ -361,40 +423,45 @@ static int arfValidateSkeleton(const struct arfAvatar *avatar, const struct arfJ
 
     for (unsigned int i=0; i<jointCount; i++)
     {
-        const char *name = arfJsonString(arfJsonAt(joints,i),"");
-        if (strcmp(name,avatar->nodes[i].id)!=0)
+        int jointId = (int) arfJsonNumber(arfJsonAt(joints,i),-1.0);
+        if (jointId != (int) i)
         {
-            arfSetError("skeleton joint %u is \"%s\" but components.nodes[%u] is \"%s\" -- "
-                        "the two orders must agree, AAU joint indices address this list",
-                        i,name,i,avatar->nodes[i].id);
+            arfSetError("skeleton joint %u is node id %d, but AAU joint indices assume this list "
+                        "agrees with components.nodes order -- the two orders must agree",
+                        i,jointId);
             return 0;
         }
     }
 
-    const char *root = arfJsonString(arfJsonMember(skeleton,"root"),0);
-    if (root!=0)
+    int rootId = (int) arfJsonNumber(arfJsonMember(skeleton,"root"),-1.0);
+    if (rootId != (int) avatar->rootNode)
     {
-        int rootIndex = arfFindNode(avatar,root);
-        if (rootIndex != (int) avatar->rootNode)
-        {
-            arfSetError("skeleton root is \"%s\" but the parentless node is \"%s\"",
-                        root,avatar->nodes[avatar->rootNode].id);
-            return 0;
-        }
+        arfSetError("skeleton root is node id %d but the parentless node is \"%s\" (id %u)",
+                    rootId,avatar->nodes[avatar->rootNode].name,avatar->rootNode);
+        return 0;
     }
 
     return 1;
 }
 
-/** @brief Load the mesh positions and triangle indices. */
+/** @brief Load the mesh positions and triangle indices.
+ *
+ *  Mesh.data is an array of numeric data-item references; the spec text
+ *  available to this project does not pin down what each slot means beyond
+ *  "mesh data", so [0]=positions, [1]=indices is this library's own
+ *  documented convention (arf_format.h), not a verified spec order. */
 static int arfLoadMesh(struct arfAvatar *avatar, zip_t *archive,
                        const struct arfJsonValue *mesh, const struct arfJsonValue *dataArray)
 {
-    const char *positionsURI = arfResolveDataURI(dataArray,arfJsonString(arfJsonMember(mesh,"positions"),ARF_ID_MESH_POSITIONS));
-    const char *indicesURI   = arfResolveDataURI(dataArray,arfJsonString(arfJsonMember(mesh,"indices"),ARF_ID_MESH_INDICES));
+    const struct arfJsonValue *data = arfJsonMember(mesh,"data");
 
-    if (positionsURI==0) { arfSetError("mesh positions reference does not resolve to a data item"); return 0; }
-    if (indicesURI==0)   { arfSetError("mesh indices reference does not resolve to a data item");   return 0; }
+    if (arfJsonCount(data) < 2) { arfSetError("mesh.data must list at least 2 data items (positions, indices)"); return 0; }
+
+    const char *positionsURI = arfResolveDataURI(dataArray,(int) arfJsonNumber(arfJsonAt(data,0),-1.0));
+    const char *indicesURI   = arfResolveDataURI(dataArray,(int) arfJsonNumber(arfJsonAt(data,1),-1.0));
+
+    if (positionsURI==0) { arfSetError("mesh.data[0] (positions) does not resolve to a data item"); return 0; }
+    if (indicesURI==0)   { arfSetError("mesh.data[1] (indices) does not resolve to a data item");   return 0; }
 
     size_t size  = 0;
     void  *bytes = arfExtractEntry(archive,positionsURI,&size);
@@ -463,27 +530,16 @@ static int arfLoadMesh(struct arfAvatar *avatar, zip_t *archive,
     return 1;
 }
 
-/** @brief Load the sparse skin weights and the inverse bind matrices. */
+/** @brief Load the sparse skin weights and the inverse bind matrices.
+ *  @param skin components.skins[0], already found and cross-checked by the
+ *  caller against the mesh and skeleton it names. */
 static int arfLoadSkin(struct arfAvatar *avatar, zip_t *archive,
-                       const struct arfJsonValue *components, const struct arfJsonValue *skinId,
+                       const struct arfJsonValue *components, const struct arfJsonValue *skin,
                        const struct arfJsonValue *dataArray)
 {
-    const struct arfJsonValue *skins = arfJsonMember(components,"skins");
-    const struct arfJsonValue *skin  = 0;
-    const char *wanted = arfJsonString(skinId,0);
-
-    for (unsigned int i=0; i<arfJsonCount(skins); i++)
-    {
-        const struct arfJsonValue *candidate = arfJsonAt(skins,i);
-        const char *id = arfJsonString(arfJsonMember(candidate,"id"),0);
-
-        if ( (wanted==0) || ((id!=0) && (strcmp(id,wanted)==0)) ) { skin = candidate; break; }
-    }
-
-    if (skin==0) { arfSetError("the mesh references skin \"%s\" which is not in components.skins",(wanted!=0)?wanted:"?"); return 0; }
-
-    const char *weightsURI = arfResolveDataURI(dataArray,arfJsonString(arfJsonMember(skin,"weights"),ARF_ID_SKIN_WEIGHTS));
-    if (weightsURI==0) { arfSetError("skin weights reference does not resolve to a data item"); return 0; }
+    int weightsId = (int) arfJsonNumber(arfJsonMember(skin,"weights"),-1.0);
+    const char *weightsURI = arfResolveDataURI(dataArray,weightsId);
+    if (weightsURI==0) { arfSetError("skin.weights (data id %d) does not resolve to a data item",weightsId); return 0; }
 
     size_t size  = 0;
     void  *bytes = arfExtractEntry(archive,weightsURI,&size);
@@ -587,13 +643,13 @@ static int arfLoadSkin(struct arfAvatar *avatar, zip_t *archive,
     }
     free(bytes);
 
-    /* Inverse bind matrices.  The skeleton names the data item; fall back on
-     * the writer's own id when it does not. */
+    /* Inverse bind matrices, named by the skeleton (singular field in the
+     * spec: inverseBindMatrix, one data item covering every joint). */
     const struct arfJsonValue *skeleton = arfJsonAt(arfJsonMember(components,"skeletons"),0);
-    const char *inverseBindURI = arfResolveDataURI(dataArray,
-                                    arfJsonString(arfJsonMember(skeleton,"inverseBindMatrices"),ARF_ID_INVERSE_BIND));
+    int inverseBindId = (int) arfJsonNumber(arfJsonMember(skeleton,"inverseBindMatrix"),-1.0);
+    const char *inverseBindURI = arfResolveDataURI(dataArray,inverseBindId);
 
-    if (inverseBindURI==0) { arfSetError("inverse bind matrices reference does not resolve to a data item"); return 0; }
+    if (inverseBindURI==0) { arfSetError("skeleton.inverseBindMatrix (data id %d) does not resolve to a data item",inverseBindId); return 0; }
 
     bytes = arfExtractEntry(archive,inverseBindURI,&size);
     if (bytes==0) { return 0; }
@@ -625,12 +681,18 @@ static int arfLoadSkin(struct arfAvatar *avatar, zip_t *archive,
     return 1;
 }
 
-/** @brief Load the optional facial blendshape target tensor. */
+/** @brief Load the optional facial blendshape target tensor.
+ *
+ *  Conformant BlendshapeSet.shapes is an array of per-shape GLB geometry
+ *  references; this library still writes/reads its own single combined
+ *  dense delta tensor as shapes[0] -- see doc/CONFORMANCE_GAPS.md, GLB
+ *  targets are a later milestone, not this one. */
 static int arfLoadBlendshapes(struct arfAvatar *avatar, zip_t *archive,
                               const struct arfJsonValue *set, const struct arfJsonValue *dataArray)
 {
-    const char *deltasURI = arfResolveDataURI(dataArray,arfJsonString(arfJsonMember(set,"deltas"),ARF_ID_FACE_DELTAS));
-    if (deltasURI==0) { arfSetError("blendshape deltas reference does not resolve to a data item"); return 0; }
+    int deltasId = (int) arfJsonNumber(arfJsonAt(arfJsonMember(set,"shapes"),0),-1.0);
+    const char *deltasURI = arfResolveDataURI(dataArray,deltasId);
+    if (deltasURI==0) { arfSetError("blendshapeSet.shapes[0] (data id %d) does not resolve to a data item",deltasId); return 0; }
 
     size_t size  = 0;
     void  *bytes = arfExtractEntry(archive,deltasURI,&size);
@@ -855,25 +917,6 @@ static int arfLoadFaceStream(struct arfAvatar *avatar, const void *bytes, size_t
     return 1;
 }
 
-/** @brief Find an animation stream's uri by the profile it declares. */
-static const char *arfFindStreamURI(const struct arfJsonValue *structure, const char *profile)
-{
-    const struct arfJsonValue *streams = arfJsonMember(structure,"animationStreams");
-
-    for (unsigned int i=0; i<arfJsonCount(streams); i++)
-    {
-        const struct arfJsonValue *stream = arfJsonAt(streams,i);
-        const char *frameworks = arfJsonString(arfJsonMember(stream,"frameworks"),0);
-
-        if ( (frameworks!=0) && (strcmp(frameworks,profile)==0) )
-        {
-            return arfJsonString(arfJsonMember(stream,"uri"),0);
-        }
-    }
-    return 0;
-}
-
-
 /* ===========================================================================
  *  Entry points
  * =========================================================================*/
@@ -954,21 +997,35 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
     snprintf(avatar->name,sizeof(avatar->name),"%s",arfJsonString(arfJsonMember(metadata,"name"),"avatar"));
     snprintf(avatar->id,sizeof(avatar->id),"%s",arfJsonString(arfJsonMember(metadata,"id"),"0"));
 
+    if (arfJsonCount(arfJsonMember(structure,"assets"))==0)
+    {
+        arfSetError("structure.assets is empty or missing");
+        goto failed;
+    }
+
     if (!arfLoadNodes(avatar,components))        { goto failed; }
     if (!arfValidateSkeleton(avatar,components)) { goto failed; }
 
     const struct arfJsonValue *mesh = arfJsonAt(arfJsonMember(components,"meshes"),0);
     if (mesh==0) { arfSetError("components.meshes is empty or missing"); goto failed; }
 
-    if (!arfLoadMesh(avatar,archive,mesh,dataArray)) { goto failed; }
-    if (!arfLoadSkin(avatar,archive,components,arfJsonMember(mesh,"skin"),dataArray)) { goto failed; }
+    const struct arfJsonValue *skin = arfJsonAt(arfJsonMember(components,"skins"),0);
+    if (skin==0) { arfSetError("components.skins is empty or missing"); goto failed; }
 
-    /* Body animation. */
-    const char *jointURI = arfFindStreamURI(structure,ARF_PROFILE_BODY);
-    if (jointURI==0) { jointURI = ARF_ENTRY_JOINT_STREAM; }
+    int skinMesh = (int) arfJsonNumber(arfJsonMember(skin,"mesh"),-1.0);
+    if (skinMesh != 0) { arfSetError("skins[0].mesh is %d, expected 0 -- one mesh, one skin",skinMesh); goto failed; }
 
+    int skinSkeleton = (int) arfJsonNumber(arfJsonMember(skin,"skeleton"),-1.0);
+    if (skinSkeleton != 0) { arfSetError("skins[0].skeleton is %d, expected 0 -- one skeleton",skinSkeleton); goto failed; }
+
+    if (!arfLoadMesh(avatar,archive,mesh,dataArray))            { goto failed; }
+    if (!arfLoadSkin(avatar,archive,components,skin,dataArray)) { goto failed; }
+
+    /* Body animation.  The spec has no arf.json field naming this stream's
+     * location for a Zip container; it is found by the fixed path the
+     * container-format clause locates it at. */
     size_t streamSize = 0;
-    streamBytes = arfExtractEntry(archive,jointURI,&streamSize);
+    streamBytes = arfExtractEntry(archive,ARF_ENTRY_JOINT_STREAM,&streamSize);
     if (streamBytes==0) { goto failed; }
 
     if (!arfLoadJointStream(avatar,streamBytes,streamSize)) { goto failed; }
@@ -977,13 +1034,19 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
 
     /* Face animation, if this container carries one. */
     const struct arfJsonValue *blendshapeSet = arfJsonAt(arfJsonMember(components,"blendshapeSets"),0);
-    const char *faceURI = arfFindStreamURI(structure,ARF_PROFILE_FACE);
 
-    if ( (blendshapeSet!=0) && (faceURI!=0) )
+    if (blendshapeSet!=0)
     {
+        int blendshapeBaseMesh = (int) arfJsonNumber(arfJsonMember(blendshapeSet,"baseMesh"),-1.0);
+        if (blendshapeBaseMesh != 0)
+        {
+            arfSetError("blendshapeSets[0].baseMesh is %d, expected 0",blendshapeBaseMesh);
+            goto failed;
+        }
+
         if (!arfLoadBlendshapes(avatar,archive,blendshapeSet,dataArray)) { goto failed; }
 
-        streamBytes = arfExtractEntry(archive,faceURI,&streamSize);
+        streamBytes = arfExtractEntry(archive,ARF_ENTRY_FACE_STREAM,&streamSize);
         if (streamBytes==0) { goto failed; }
 
         if (!arfLoadFaceStream(avatar,streamBytes,streamSize)) { goto failed; }
@@ -1082,7 +1145,7 @@ void arfPrintInfo(const struct arfAvatar *avatar)
     if (avatar==0) { return; }
 
     printf("avatar        : \"%s\" id=\"%s\"\n",avatar->name,avatar->id);
-    printf("skeleton      : %u nodes, root=\"%s\"\n",avatar->numberOfNodes,avatar->nodes[avatar->rootNode].id);
+    printf("skeleton      : %u nodes, root=\"%s\"\n",avatar->numberOfNodes,avatar->nodes[avatar->rootNode].name);
     printf("mesh          : %u vertices, %u triangles\n",avatar->mesh.numberOfVertices,avatar->mesh.numberOfTriangles);
 
     float minimum[3] = {  1e30f,  1e30f,  1e30f };
@@ -1140,7 +1203,7 @@ void arfPrintInfo(const struct arfAvatar *avatar)
         }
 
         printf("root path     : \"%s\" X=[%.1f,%.1f] Y=[%.1f,%.1f] Z=[%.1f,%.1f] cm\n",
-               avatar->nodes[root].id,
+               avatar->nodes[root].name,
                rootMinimum[0],rootMaximum[0],rootMinimum[1],rootMaximum[1],rootMinimum[2],rootMaximum[2]);
     }
 

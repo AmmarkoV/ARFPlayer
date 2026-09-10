@@ -78,13 +78,16 @@ enum arfResult
 };
 
 /** @brief One joint of the rest skeleton, as listed in components.nodes.
- *  Node order is also the joint order used by AAU jointIndex values. */
+ *  Node order is also the joint order used by AAU jointIndex values, and is
+ *  this node's numeric id (components.nodes[i].id == i, this project's own
+ *  convention since the format only requires ids to be unique). */
 struct arfNode
 {
-    char  id[ARF_MAX_NAME];
-    int   parent;            /**< index into arfAvatar::nodes, -1 on the root */
-    float translation[3];    /**< rest, parent-relative, centimetres */
-    float rotation[4];       /**< rest, XYZW quaternion */
+    char  name[ARF_MAX_NAME]; /**< components.nodes[i].name */
+    int   parent;             /**< index into arfAvatar::nodes, -1 on the root */
+    float translation[3];     /**< rest, parent-relative, centimetres */
+    float rotation[4];        /**< rest, XYZW quaternion */
+    float scale[3];           /**< rest, non-uniform scale, {1,1,1} if unset */
 };
 
 /** @brief The personalised rest mesh. */
@@ -322,7 +325,7 @@ struct arfAvatar *arfCreate(unsigned int numberOfNodes,
 
 /** @brief Fill in one rest-skeleton node.
  *  @param parent index of the parent node, or -1 to make this the root */
-int arfSetNode(struct arfAvatar *avatar, unsigned int index, const char *id, int parent,
+int arfSetNode(struct arfAvatar *avatar, unsigned int index, const char *name, int parent,
                const float *translation, const float *rotation);
 
 /** @brief Append one body animation frame.

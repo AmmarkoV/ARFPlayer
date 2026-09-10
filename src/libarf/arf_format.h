@@ -1,20 +1,20 @@
 /** @file arf_format.h
- *  @brief The on-the-wire constants and byte layouts of a SAM3DBody-flavoured
- *         MPEG ARF container, in one place.
+ *  @brief The on-the-wire constants and byte layouts of this library's ARF
+ *         container, in one place.
  *
- *  This file exists for one reason: the writer that produces these containers
- *  lives in a different repository (SAM3DBody-cpp, src/SAM3DBODY-cpp/arf_writer.cpp)
- *  and will keep evolving.  Everything this library assumes about the byte
- *  layout is stated here, so that when a container stops loading there is
- *  exactly one file to diff against the writer instead of a hunt through the
- *  parser.  Nothing here allocates, parses or depends on anything.
+ *  Conformance status, see doc/CONFORMANCE_GAPS.md for the full accounting:
+ *  the JSON document's component graph (numeric ids/indices, `structure` as
+ *  Asset/LOD) matches ISO/IEC 23090-39 as read from the FDIS-stage text.  The
+ *  AAU bitstream (numeric type codes, field widths), the sparse skin-weight
+ *  tensor (the spec only defines a dense one), and `BlendshapeSet.shapes`
+ *  (raw deltas here, GLB targets in the spec) are still this project's own
+ *  convention, inherited from the original SAM3DBody-flavoured design.  This
+ *  is NOT yet a fully certified-conformant implementation.
  *
- *  Honesty note, inherited from the writer's own documentation: this is NOT a
- *  certified-conformant ISO/IEC 23090-39 implementation.  The layouts below
- *  were designed against the published overview article, not the FDIS
- *  bitstream-syntax text.  The AAU numeric type codes, the byte-aligned (not
- *  7-bit-packed) unit_type, and the raw dense tensors used in place of embedded
- *  GLB blendshape targets are the writer's own convention.
+ *  Everything this library assumes about the byte layout is stated here, so
+ *  that when a container stops loading there is exactly one file to diff
+ *  against the writer instead of a hunt through the parser.  Nothing here
+ *  allocates, parses or depends on anything.
  *
  *  @author Ammar Qammaz (AmmarkoV)
  */
@@ -33,6 +33,7 @@ extern "C"
  *  A .arfz is a plain ZIP holding:
  *
  *    arf.json                    the base avatar model, see below
+ *    id_map.txt                  non-normative id->name debug index, see below
  *    data/mesh_positions.bin     dense  [n_verts, 3]           float32
  *    data/mesh_indices.bin       dense  [n_tris, 3]            uint32
  *    data/skin_weights.bin       sparse dims [n_verts, n_joints]
@@ -42,9 +43,17 @@ extern "C"
  *    animations/face.bin         AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
  *
  *  Every integer and float in the binary payloads is little-endian.
+ *
+ *  arf.json's `structure`/`components` use numeric ids: every component's id
+ *  is its index within its own components.<array>, e.g. components.nodes[i]
+ *  has id i.  Since this library only ever holds one mesh/skin/skeleton/
+ *  blendshapeSet, those always get id 0.  animations/ streams are located by
+ *  the fixed paths above -- the spec's Zip-container clause locates them by
+ *  convention, there is no arf.json field naming them.
  * -------------------------------------------------------------------------*/
 
 #define ARF_ENTRY_JSON            "arf.json"
+#define ARF_ENTRY_ID_MAP          "id_map.txt"
 #define ARF_ENTRY_MESH_POSITIONS  "data/mesh_positions.bin"
 #define ARF_ENTRY_MESH_INDICES    "data/mesh_indices.bin"
 #define ARF_ENTRY_SKIN_WEIGHTS    "data/skin_weights.bin"
@@ -53,14 +62,22 @@ extern "C"
 #define ARF_ENTRY_JOINT_STREAM    "animations/joints.bin"
 #define ARF_ENTRY_FACE_STREAM     "animations/face.bin"
 
-/* The ids the writer gives its data items; component references in arf.json
- * resolve against these, and the reader falls back on them when a container
- * omits an optional cross-reference. */
+/* data[].name for each data item -- descriptive only, arf.json resolves
+ * component -> data references by data[].id (below), not by this string. */
 #define ARF_ID_MESH_POSITIONS     "mesh_positions"
 #define ARF_ID_MESH_INDICES       "mesh_indices"
 #define ARF_ID_SKIN_WEIGHTS       "skin_weights"
 #define ARF_ID_INVERSE_BIND       "inverse_bind_matrices"
 #define ARF_ID_FACE_DELTAS        "face_blendshape_deltas"
+
+/* data[].id for each data item -- what component fields (Skeleton.
+ * inverseBindMatrix, Skin.weights, Mesh.data[], BlendshapeSet.shapes[])
+ * actually reference. */
+#define ARF_DATA_ID_MESH_POSITIONS 0
+#define ARF_DATA_ID_MESH_INDICES   1
+#define ARF_DATA_ID_SKIN_WEIGHTS   2
+#define ARF_DATA_ID_INVERSE_BIND   3
+#define ARF_DATA_ID_FACE_DELTAS    4
 
 #define ARF_MIME_DENSE            "application/mpeg.arf.dense"
 #define ARF_MIME_SPARSE           "application/mpeg.arf.sparse"
@@ -70,6 +87,17 @@ extern "C"
 #define ARF_PROFILE_BODY          "arf-body-v1"
 #define ARF_PROFILE_FACE          "arf-face-v1"
 #define ARF_BLENDSHAPE_SET_ID     "face_expression"
+
+/* ---------------------------------------------------------------------------
+ *  id_map.txt (non-normative)
+ * ---------------------------------------------------------------------------
+ *  A flat, greppable "<type>\t<id>\t<name>" line per component, so that a raw
+ *  AAU_JOINT stream's numeric joint indices can be matched to a name without
+ *  a JSON parser.  Every component already carries its own mandatory `name`
+ *  field in arf.json -- this is a debugging convenience only, never
+ *  referenced from data[]/structure/components, and a conformant reader has
+ *  no reason to open it.
+ * -------------------------------------------------------------------------*/
 
 /* ---------------------------------------------------------------------------
  *  Component types -- glTF accessor component-type codes, reused verbatim.

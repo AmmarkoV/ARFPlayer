@@ -66,10 +66,11 @@ class ArfError(Exception):
 
 class _Node(ctypes.Structure):
     _fields_ = [
-        ("id", ctypes.c_char * MAX_NAME),
+        ("name", ctypes.c_char * MAX_NAME),
         ("parent", ctypes.c_int),
         ("translation", ctypes.c_float * 3),
         ("rotation", ctypes.c_float * 4),
+        ("scale", ctypes.c_float * 3),
     ]
 
 
@@ -276,17 +277,18 @@ def _view(pointer, count: int, shape):
 class Node:
     """One rest-skeleton joint."""
 
-    __slots__ = ("index", "id", "parent", "translation", "rotation")
+    __slots__ = ("index", "name", "parent", "translation", "rotation", "scale")
 
     def __init__(self, index: int, raw: _Node):
         self.index = index
-        self.id = raw.id.decode("utf-8", "replace")
+        self.name = raw.name.decode("utf-8", "replace")
         self.parent = raw.parent if raw.parent >= 0 else None
         self.translation = tuple(raw.translation)
         self.rotation = tuple(raw.rotation)  # XYZW, not WXYZ
+        self.scale = tuple(raw.scale)
 
     def __repr__(self) -> str:
-        return f"Node({self.index}, {self.id!r}, parent={self.parent})"
+        return f"Node({self.index}, {self.name!r}, parent={self.parent})"
 
 
 class Pose:
@@ -515,13 +517,13 @@ class Avatar:
 
     # -- writing ------------------------------------------------------------
 
-    def set_node(self, index: int, node_id: str, parent, translation=None, rotation=None) -> None:
+    def set_node(self, index: int, name: str, parent, translation=None, rotation=None) -> None:
         """Fill in one rest-skeleton node.  `parent` is an index, or None for
         the root, and must be less than `index`."""
         as_float3 = (ctypes.c_float * 3)
         as_float4 = (ctypes.c_float * 4)
         _check(library.arfSetNode(
-            self._handle, index, node_id.encode("utf-8"),
+            self._handle, index, name.encode("utf-8"),
             -1 if parent is None else parent,
             ctypes.cast(as_float3(*translation), ctypes.POINTER(ctypes.c_float)) if translation else None,
             ctypes.cast(as_float4(*rotation), ctypes.POINTER(ctypes.c_float)) if rotation else None,

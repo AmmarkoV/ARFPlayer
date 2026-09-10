@@ -74,31 +74,32 @@ struct arfAvatar *arfCreate(unsigned int numberOfNodes,
     {
         avatar->nodes[j].parent = (j==0) ? -1 : 0;
         avatar->nodes[j].rotation[3] = 1.0f;
-        snprintf(avatar->nodes[j].id,ARF_MAX_NAME,"joint%u",j);
+        avatar->nodes[j].scale[0] = avatar->nodes[j].scale[1] = avatar->nodes[j].scale[2] = 1.0f;
+        snprintf(avatar->nodes[j].name,ARF_MAX_NAME,"joint%u",j);
         arfIdentity4x4(avatar->skin.inverseBindMatrices + (size_t) j * 16);
     }
 
     return avatar;
 }
 
-int arfSetNode(struct arfAvatar *avatar, unsigned int index, const char *id, int parent,
+int arfSetNode(struct arfAvatar *avatar, unsigned int index, const char *name, int parent,
                const float *translation, const float *rotation)
 {
-    if ( (avatar==0) || (id==0) )          { arfSetError("no avatar or node id was given"); return ARF_ERROR_ARGUMENT; }
+    if ( (avatar==0) || (name==0) )        { arfSetError("no avatar or node name was given"); return ARF_ERROR_ARGUMENT; }
     if (index >= avatar->numberOfNodes)    { arfSetError("node index %u is past the %u node skeleton",index,avatar->numberOfNodes); return ARF_ERROR_ARGUMENT; }
-    if (strlen(id) >= ARF_MAX_NAME)        { arfSetError("node id \"%s\" is longer than the %d character limit",id,ARF_MAX_NAME-1); return ARF_ERROR_ARGUMENT; }
+    if (strlen(name) >= ARF_MAX_NAME)      { arfSetError("node name \"%s\" is longer than the %d character limit",name,ARF_MAX_NAME-1); return ARF_ERROR_ARGUMENT; }
 
     /* Parents must precede their children, both because the format's readers
      * compose the hierarchy in a single forward pass and because it is the
      * only cheap guarantee against a cycle. */
     if ( (parent >= (int) index) || (parent < -1) )
     {
-        arfSetError("node %u \"%s\" cannot have parent %d -- parents must be listed before their children",index,id,parent);
+        arfSetError("node %u \"%s\" cannot have parent %d -- parents must be listed before their children",index,name,parent);
         return ARF_ERROR_ARGUMENT;
     }
 
     struct arfNode *node = &avatar->nodes[index];
-    strcpy(node->id,id);
+    strcpy(node->name,name);
     node->parent = parent;
 
     if (parent < 0) { avatar->rootNode = index; }
@@ -380,16 +381,19 @@ static void arfJsonUnsigned(struct arfBuffer *buffer, unsigned long long value)
     arfJsonText(buffer,text);
 }
 
-/** @brief One entry of the data[] array. */
-static void arfJsonDataItem(struct arfBuffer *buffer, const char *id, const char *uri,
-                            const char *mimeType, size_t byteLength, int isLast)
+/** @brief One entry of the data[] array.  @param id the data item's numeric
+ *  id (its position in data[], this library's own numbering convention). */
+static void arfJsonDataItem(struct arfBuffer *buffer, int id, const char *name, const char *uri,
+                            const char *type, size_t byteLength, int isLast)
 {
     arfJsonText(buffer,"    {\"id\": ");
-    arfJsonQuoted(buffer,id);
+    arfJsonUnsigned(buffer,(unsigned long long) id);
+    arfJsonText(buffer,", \"name\": ");
+    arfJsonQuoted(buffer,name);
     arfJsonText(buffer,", \"uri\": ");
     arfJsonQuoted(buffer,uri);
-    arfJsonText(buffer,", \"mimeType\": ");
-    arfJsonQuoted(buffer,mimeType);
+    arfJsonText(buffer,", \"type\": ");
+    arfJsonQuoted(buffer,type);
     arfJsonText(buffer,", \"byteLength\": ");
     arfJsonUnsigned(buffer,(unsigned long long) byteLength);
     arfJsonText(buffer,isLast ? "}\n" : "},\n");
@@ -399,7 +403,12 @@ static void arfJsonDataItem(struct arfBuffer *buffer, const char *id, const char
  *
  *  The byteLength fields come from the encoded buffers rather than from any
  *  recomputed size, which is what keeps the document and the binaries in
- *  agreement. */
+ *  agreement.
+ *
+ *  Every component's numeric id is its index within its own
+ *  components.<array> -- this library only ever holds one mesh/skin/
+ *  skeleton/blendshapeSet, so those always get id 0.  data[] ids are defined
+ *  in arf_format.h (ARF_DATA_ID_*). */
 static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avatar,
                          size_t positionsBytes, size_t indicesBytes, size_t weightsBytes,
                          size_t inverseBindBytes, size_t deltaBytes)
@@ -417,15 +426,13 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
     arfJsonQuoted(buffer,avatar->id);
     arfJsonText(buffer,"},\n");
 
-    arfJsonText(buffer,"  \"structure\": {\"animationStreams\": [\n");
-    arfJsonText(buffer,"    {\"id\": \"body_joints\", \"uri\": \"" ARF_ENTRY_JOINT_STREAM
-                       "\", \"frameworks\": \"" ARF_PROFILE_BODY "\"}");
-    if (avatar->hasFace)
-    {
-        arfJsonText(buffer,",\n    {\"id\": \"" ARF_BLENDSHAPE_SET_ID "\", \"uri\": \"" ARF_ENTRY_FACE_STREAM
-                           "\", \"frameworks\": \"" ARF_PROFILE_FACE "\"}");
-    }
-    arfJsonText(buffer,"\n  ]},\n");
+    /* structure.assets[].lods[] replaces the invented animationStreams field --
+     * the spec has no field naming the animation streams, they are located by
+     * the fixed paths in arf_format.h per the Zip-container clause. */
+    arfJsonText(buffer,"  \"structure\": {\"assets\": [{\"name\": \"body\", \"isMain\": true, \"lods\": [\n");
+    arfJsonText(buffer,"    {\"name\": \"lod0\", \"skins\": [0], \"meshes\": [0], \"skeletons\": [0]");
+    if (avatar->hasFace) { arfJsonText(buffer,", \"blendshapeSets\": [0]"); }
+    arfJsonText(buffer,"}\n  ]}]},\n");
 
     arfJsonText(buffer,"  \"components\": {\n");
 
@@ -435,12 +442,21 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
         const struct arfNode *node = &avatar->nodes[j];
 
         arfJsonText(buffer,"      {\"id\": ");
-        arfJsonQuoted(buffer,node->id);
+        arfJsonUnsigned(buffer,j);
+        arfJsonText(buffer,", \"name\": ");
+        arfJsonQuoted(buffer,node->name);
+
+        /* mapping is a mandatory semantic path in the spec; this project has
+         * no access to a verified taxonomy for it (that lives in the scene
+         * description part, 23090-14), so the node's own name is used as an
+         * honest single-segment placeholder rather than a fabricated one. */
+        arfJsonText(buffer,", \"mapping\": ");
+        arfJsonQuoted(buffer,node->name);
 
         if (node->parent >= 0)
         {
             arfJsonText(buffer,", \"parent\": ");
-            arfJsonQuoted(buffer,avatar->nodes[node->parent].id);
+            arfJsonUnsigned(buffer,(unsigned int) node->parent);
         }
 
         arfJsonText(buffer,", \"translation\": [");
@@ -457,48 +473,83 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
             arfJsonFloat(buffer,node->rotation[c]);
         }
 
+        arfJsonText(buffer,"], \"scale\": [");
+        for (unsigned int c=0; c<3; c++)
+        {
+            if (c>0) { arfJsonText(buffer,", "); }
+            arfJsonFloat(buffer,node->scale[c]);
+        }
+
         arfJsonText(buffer,(j+1 < avatar->numberOfNodes) ? "]},\n" : "]}\n");
     }
     arfJsonText(buffer,"    ],\n");
 
-    arfJsonText(buffer,"    \"skeletons\": [{\"id\": \"skeleton0\", \"root\": ");
-    arfJsonQuoted(buffer,avatar->nodes[avatar->rootNode].id);
+    arfJsonText(buffer,"    \"skeletons\": [{\"id\": 0, \"name\": \"skeleton0\", \"root\": ");
+    arfJsonUnsigned(buffer,avatar->rootNode);
     arfJsonText(buffer,", \"joints\": [");
     for (unsigned int j=0; j<avatar->numberOfNodes; j++)
     {
         if (j>0) { arfJsonText(buffer,", "); }
-        arfJsonQuoted(buffer,avatar->nodes[j].id);
+        arfJsonUnsigned(buffer,j);
     }
-    arfJsonText(buffer,"], \"inverseBindMatrices\": \"" ARF_ID_INVERSE_BIND "\"}],\n");
+    arfJsonText(buffer,"], \"inverseBindMatrix\": ");
+    arfJsonUnsigned(buffer,ARF_DATA_ID_INVERSE_BIND);
+    arfJsonText(buffer,"}],\n");
 
-    arfJsonText(buffer,"    \"skins\": [{\"id\": \"skin0\", \"skeleton\": \"skeleton0\", \"weights\": \""
-                       ARF_ID_SKIN_WEIGHTS "\"}],\n");
+    arfJsonText(buffer,"    \"skins\": [{\"id\": 0, \"name\": \"skin0\", \"mapping\": \"skin0\", "
+                       "\"skeleton\": 0, \"mesh\": 0, \"weights\": ");
+    arfJsonUnsigned(buffer,ARF_DATA_ID_SKIN_WEIGHTS);
+    arfJsonText(buffer,"}],\n");
 
-    arfJsonText(buffer,"    \"meshes\": [{\"id\": \"mesh0\", \"positions\": \"" ARF_ID_MESH_POSITIONS
-                       "\", \"indices\": \"" ARF_ID_MESH_INDICES "\", \"skin\": \"skin0\"}]");
+    arfJsonText(buffer,"    \"meshes\": [{\"id\": 0, \"name\": \"mesh0\", \"path\": \"mesh0\", \"data\": [");
+    arfJsonUnsigned(buffer,ARF_DATA_ID_MESH_POSITIONS);
+    arfJsonText(buffer,", ");
+    arfJsonUnsigned(buffer,ARF_DATA_ID_MESH_INDICES);
+    arfJsonText(buffer,"]}]");
 
     if (avatar->hasFace)
     {
-        arfJsonText(buffer,",\n    \"blendshapeSets\": [{\"id\": \"" ARF_BLENDSHAPE_SET_ID
-                           "\", \"baseMesh\": \"mesh0\", \"count\": ");
-        arfJsonUnsigned(buffer,avatar->blendshapes.numberOfShapes);
-        arfJsonText(buffer,", \"deltas\": \"" ARF_ID_FACE_DELTAS "\"}]");
+        arfJsonText(buffer,",\n    \"blendshapeSets\": [{\"id\": 0, \"name\": \"" ARF_BLENDSHAPE_SET_ID
+                           "\", \"baseMesh\": 0, \"shapes\": [");
+        arfJsonUnsigned(buffer,ARF_DATA_ID_FACE_DELTAS);
+        arfJsonText(buffer,"]}]");
     }
 
     arfJsonText(buffer,"\n  },\n");
 
     arfJsonText(buffer,"  \"data\": [\n");
-    arfJsonDataItem(buffer,ARF_ID_MESH_POSITIONS,ARF_ENTRY_MESH_POSITIONS,ARF_MIME_DENSE, positionsBytes,  0);
-    arfJsonDataItem(buffer,ARF_ID_MESH_INDICES,  ARF_ENTRY_MESH_INDICES,  ARF_MIME_DENSE, indicesBytes,    0);
-    arfJsonDataItem(buffer,ARF_ID_SKIN_WEIGHTS,  ARF_ENTRY_SKIN_WEIGHTS,  ARF_MIME_SPARSE,weightsBytes,    0);
-    arfJsonDataItem(buffer,ARF_ID_INVERSE_BIND,  ARF_ENTRY_INV_BIND_POSE, ARF_MIME_DENSE, inverseBindBytes,!avatar->hasFace);
+    arfJsonDataItem(buffer,ARF_DATA_ID_MESH_POSITIONS,ARF_ID_MESH_POSITIONS,ARF_ENTRY_MESH_POSITIONS,ARF_MIME_DENSE, positionsBytes,  0);
+    arfJsonDataItem(buffer,ARF_DATA_ID_MESH_INDICES,  ARF_ID_MESH_INDICES,  ARF_ENTRY_MESH_INDICES,  ARF_MIME_DENSE, indicesBytes,    0);
+    arfJsonDataItem(buffer,ARF_DATA_ID_SKIN_WEIGHTS,  ARF_ID_SKIN_WEIGHTS,  ARF_ENTRY_SKIN_WEIGHTS,  ARF_MIME_SPARSE,weightsBytes,    0);
+    arfJsonDataItem(buffer,ARF_DATA_ID_INVERSE_BIND,  ARF_ID_INVERSE_BIND,  ARF_ENTRY_INV_BIND_POSE, ARF_MIME_DENSE, inverseBindBytes,!avatar->hasFace);
 
     if (avatar->hasFace)
     {
-        arfJsonDataItem(buffer,ARF_ID_FACE_DELTAS,ARF_ENTRY_FACE_DELTAS,ARF_MIME_DENSE,deltaBytes,1);
+        arfJsonDataItem(buffer,ARF_DATA_ID_FACE_DELTAS,ARF_ID_FACE_DELTAS,ARF_ENTRY_FACE_DELTAS,ARF_MIME_DENSE,deltaBytes,1);
     }
 
     arfJsonText(buffer,"  ]\n}\n");
+}
+
+/** @brief Build the non-normative id_map.txt sidecar -- see arf_format.h. */
+static void arfWriteIdMap(struct arfBuffer *buffer, const struct arfAvatar *avatar)
+{
+    char line[128];
+
+    for (unsigned int j=0; j<avatar->numberOfNodes; j++)
+    {
+        snprintf(line,sizeof(line),"node\t%u\t%s\n",j,avatar->nodes[j].name);
+        arfBufferAppend(buffer,line,strlen(line));
+    }
+
+    arfBufferAppend(buffer,"mesh\t0\tmesh0\n",13);
+    arfBufferAppend(buffer,"skin\t0\tskin0\n",13);
+    arfBufferAppend(buffer,"skeleton\t0\tskeleton0\n",21);
+
+    if (avatar->hasFace)
+    {
+        arfJsonText(buffer,"blendshapeSet\t0\t" ARF_BLENDSHAPE_SET_ID "\n");
+    }
 }
 
 
@@ -547,7 +598,7 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     if ( (avatar==0) || (filename==0) )    { arfSetError("no avatar or filename was given"); return ARF_ERROR_ARGUMENT; }
     if (avatar->numberOfFrames==0)         { arfSetError("refusing to write a container with no animation frames"); return ARF_ERROR_ARGUMENT; }
 
-    struct arfBuffer positions, indices, weights, inverseBind, deltas, jointStream, faceStream, json;
+    struct arfBuffer positions, indices, weights, inverseBind, deltas, jointStream, faceStream, json, idMap;
     arfBufferInit(&positions);
     arfBufferInit(&indices);
     arfBufferInit(&weights);
@@ -556,6 +607,7 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     arfBufferInit(&jointStream);
     arfBufferInit(&faceStream);
     arfBufferInit(&json);
+    arfBufferInit(&idMap);
 
     int    result  = ARF_ERROR_IO;
     zip_t *archive = 0;
@@ -583,6 +635,7 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     }
 
     arfWriteJson(&json,avatar,positions.length,indices.length,weights.length,inverseBind.length,deltas.length);
+    arfWriteIdMap(&idMap,avatar);
 
     int openError = 0;
     archive = zip_open(filename,ZIP_CREATE | ZIP_TRUNCATE,&openError);
@@ -596,6 +649,7 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     }
 
     if (!arfAddEntry(archive,ARF_ENTRY_JSON,&json))                  { goto cleanup; }
+    if (!arfAddEntry(archive,ARF_ENTRY_ID_MAP,&idMap))               { goto cleanup; }
     if (!arfAddEntry(archive,ARF_ENTRY_MESH_POSITIONS,&positions))   { goto cleanup; }
     if (!arfAddEntry(archive,ARF_ENTRY_MESH_INDICES,&indices))       { goto cleanup; }
     if (!arfAddEntry(archive,ARF_ENTRY_SKIN_WEIGHTS,&weights))       { goto cleanup; }
@@ -632,6 +686,7 @@ cleanup:
     arfBufferFree(&jointStream);
     arfBufferFree(&faceStream);
     arfBufferFree(&json);
+    arfBufferFree(&idMap);
 
     return result;
 }
