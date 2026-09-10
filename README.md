@@ -47,6 +47,30 @@ On Fedora that is `libzip-devel`, on macOS `brew install libzip`.
 No source is vendored and nothing is fetched at build time — the JSON parser is
 part of the library, and everything else is a system package.
 
+## The sample
+
+**[`samples/summerlove_0.arfz`](samples/summerlove_0.arfz)** is committed so the
+player is testable straight after a build, with no ML stack and nothing to
+download. Every command in this README uses it.
+
+| | |
+|---|---|
+| skeleton | 127 joints, root `body_world` |
+| mesh | 18 439 vertices, 36 874 triangles, 51 337 sparse skin weights |
+| animation | 551 frames at 30 fps — 18.37 s of a dance clip |
+| face track | none (a `--dev-face` container adds ~16 MB of blendshape deltas) |
+| size | 2.6 MB |
+
+```bash
+./build/arfplay --info samples/summerlove_0.arfz
+```
+
+It is one tracked person out of `summerlove.mp4` in
+[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp), exported with
+`--arf`. This export is clean — `--info` reports no glitch frames and the
+skeleton never exceeds 37°/frame — so it plays through without any repair. See
+[Glitch frames](#glitch-frames) for the failure mode earlier exports had.
+
 ## Using the player
 
 ```bash
@@ -90,16 +114,24 @@ rest prerotation — so every so often two or three frames come out about 100°
 off the smooth trajectory. One joint, a couple of frames, and because
 everything hangs off the pelvis **the whole body folds over sideways**.
 
-The committed sample has 16 such frames out of 551, all in the first 1.5
-seconds. They are not detectable as bad data: the matrices are orthogonal, unit
-determinant, correctly framed. Only their velocity gives them away.
+An earlier export of this very clip had 16 such frames out of 551, all in the
+first 1.5 seconds, and the body folded flat on each of them — the mesh dropped
+from 165 cm tall to as little as 50 cm. They are not detectable as bad data:
+the matrices are orthogonal, unit determinant, correctly framed. Only their
+velocity gives them away, at up to 155°/frame against a 1.8°/frame mean.
+
+**The container committed here is a later, clean export**: no joint exceeds
+37°/frame, `--info` reports zero glitch frames, and `--despike` has nothing to
+do. The repair stays in the library because the failure mode belongs to the
+format's producer rather than to any one file, and an older container or a
+different clip may still carry it.
 
 `arfDespikeFrames()` flags frames whose largest per-joint angular velocity
 exceeds a threshold (40°/frame by default) and rebuilds them by slerp/lerp from
 the nearest clean frames either side, then refines the flagged set so that real
 motion caught between two nearby glitches is given back rather than
-interpolated away. On the sample it rewrites 16 frames and leaves the other 97%
-untouched.
+interpolated away. On the earlier export of this clip it rewrote 16 frames and
+left the other 97% untouched.
 
 This mirrors the two-stage despike in the producing project's GMR retargeting
 path (`tools/gmr_retarget.py`, `despike_frames`), which exists for the same
@@ -131,6 +163,35 @@ print(avatar.despike(), "frames repaired")     # or avatar.despike(25.0)
 ```cpp
 unsigned int repaired = avatar.despike();      // or avatar.despike(25.0f)
 ```
+
+## In a browser
+
+`web/` is a second, independent player: the same container reading and the same
+skinning in plain JavaScript, drawn with WebGL2. **No dependencies at all** —
+the ZIP is unpacked with the platform's own `DecompressionStream`, so there is
+no inflate library, no JSZip, no three.js. Three files, about 45 KB.
+
+```bash
+python3 -m http.server        # from the repository root
+# then open http://localhost:8000/web/
+```
+
+It loads `samples/summerlove_0.arfz` by default; `?url=` points it at another
+container. Opening `web/index.html` straight off the filesystem works too —
+the fetch is blocked there, so drag a `.arfz` onto the page or use *open*
+instead.
+
+Same controls as the desktop player: drag to orbit, right-drag to pan, wheel to
+zoom, space to play, arrows to step, `r` to reset the camera, and the timeline
+scrubs.
+
+Verified against the C library on the sample: identical joint count, vertex
+count, mesh bounding box, weight sums, frame count, root path and posed
+bounding box, and it rejects all nine of `tools/mutate_arf.py`'s broken
+containers with the same diagnoses.
+
+Needs `DecompressionStream('deflate-raw')` and WebGL2 — Chrome 80+, Firefox
+113+, Safari 16.4+. It has no despike; that lives in the C library.
 
 ## Using the library
 
@@ -278,10 +339,11 @@ src/player/        the viewer
   arf_render.{c,h}   OpenGL 3.3 core mesh and overlay drawing
   arfplay.c          command line, playback clock, timeline
 bindings/          python/arf.py (ctypes) and cpp/arf.hpp (header-only)
+web/               a dependency-free browser player: arf.js reads, player.js draws
 shaders/           the body shaders, copied unchanged from the pipeline
 examples/          arfinfo.cpp (C++ binding) and write_avatar.py (Python write path)
 tools/             validate_arf.py (oracle) and mutate_arf.py (robustness)
-samples/           a committed container to test against
+samples/           summerlove_0.arfz, the committed container every example uses
 ```
 
 ## Not implemented

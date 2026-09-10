@@ -244,8 +244,12 @@ consecutive frames carry a pelvis rotation roughly 100° off the smooth
 trajectory either side of them. Because the entire skeleton hangs off the
 pelvis, the body folds over sideways for those frames.
 
-In the committed sample this happens on 16 of 551 frames, all within the first
-1.5 seconds, in runs of two or three.
+An earlier export of the committed sample clip showed this on 16 of 551 frames,
+all within the first 1.5 seconds, in runs of two or three. The container
+committed now is a later export that is free of it — its worst joint velocity
+is 36°/frame against the earlier one's 155° — so the artifact is evidently
+fixable on the producing side, but any container predating that fix still
+carries it.
 
 **These frames are not detectable as corrupt data.** The matrices are
 orthogonal, unit determinant, unit scale, correctly framed — they are valid

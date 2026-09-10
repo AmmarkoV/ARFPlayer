@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arfplay — MPEG ARF avatar player</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    background: #16181c;
+    color: #d7dae0;
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid #262a31;
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+  header .hint { color: #767d89; font-size: 12px; }
+
+  #status { margin-left: auto; color: #9aa2ae; font-size: 12px; }
+  #status.error { color: #ff8b7a; }
+
+  main { position: relative; flex: 1; min-height: 0; }
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+  #view:active { cursor: grabbing; }
+
+  footer {
+    display: flex; align-items: center; gap: 12px;
+    padding: 9px 14px; border-top: 1px solid #262a31; background: #1a1d22;
+  }
+
+  #timeline { flex: 1; min-width: 80px; accent-color: #3f8fd6; }
+  #readout { color: #9aa2ae; font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+
+  button, select, label { font: inherit; color: inherit; }
+  button {
+    background: #272b33; border: 1px solid #363b45; border-radius: 5px;
+    padding: 4px 11px; cursor: pointer; min-width: 38px;
+  }
+  button:hover { background: #30353f; }
+  select { background: #272b33; border: 1px solid #363b45; border-radius: 5px; padding: 3px 6px; }
+  label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+
+  input[type=file] { display: none; }
+  .filebutton {
+    background: #272b33; border: 1px solid #363b45; border-radius: 5px;
+    padding: 4px 11px; cursor: pointer;
+  }
+  .filebutton:hover { background: #30353f; }
+
+  body.dragging main::after {
+    content: "drop a .arfz container";
+    position: absolute; inset: 12px;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px dashed #3f8fd6; border-radius: 8px;
+    background: rgba(63,143,214,.08); color: #cfe0f0; font-size: 15px;
+  }
+
+  @media (max-width: 620px) {
+    footer { flex-wrap: wrap; }
+    #timeline { order: -1; flex-basis: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>arfplay</h1>
+  <span class="hint">drag to orbit · right-drag to pan · wheel to zoom · space to play</span>
+  <span id="status">starting…</span>
+</header>
+
+<main><canvas id="view"></canvas></main>
+
+<footer>
+  <button id="play" title="Play / pause (space)">❚❚</button>
+  <input id="timeline" type="range" min="0" max="0" value="0" step="1" title="Scrub">
+  <span id="readout">—</span>
+  <select id="speed" title="Playback speed">
+    <option value="0.25">0.25×</option>
+    <option value="0.5">0.5×</option>
+    <option value="1" selected>1×</option>
+    <option value="2">2×</option>
+    <option value="4">4×</option>
+  </select>
+  <label title="Loop at the end (l)"><input id="loop" type="checkbox" checked> loop</label>
+  <button id="reset" title="Reset the camera (r)">reset</button>
+  <label class="filebutton">open<input id="file" type="file" accept=".arfz,.zip"></label>
+</footer>
+
+<script src="arf.js"></script>
+<script src="player.js"></script>
+</body>
+</html>
