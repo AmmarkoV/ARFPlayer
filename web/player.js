@@ -447,6 +447,53 @@ window.addEventListener('keydown', e =>
 
 /* -- loading -------------------------------------------------------------- */
 
+/** The containers committed to the repository, offered as one-click loads.
+ *  https://github.com/AmmarkoV/ARFPlayer/tree/main/samples */
+const SAMPLES = [
+    { label: 'summerlove', file: 'summerlove_0.arfz' }
+];
+
+const SAMPLES_RAW = 'https://raw.githubusercontent.com/AmmarkoV/ARFPlayer/main/samples/';
+
+/** Fetch the first of several candidate URLs that answers.
+ *
+ *  A sample is tried next to the page first, so a local checkout serves its
+ *  own copy and works offline, then from the repository, which is what makes
+ *  the buttons work when this page is hosted anywhere else.  GitHub serves raw
+ *  files with an open CORS policy, so the cross-origin fetch is allowed. */
+async function fetchFirst(urls)
+{
+    let lastProblem = null;
+    for (const url of urls)
+    {
+        try
+        {
+            const response = await fetch(url);
+            if (response.ok) { return await response.arrayBuffer(); }
+            lastProblem = new Error(response.status + ' ' + response.statusText);
+        }
+        catch (problem) { lastProblem = problem; }
+    }
+    throw lastProblem || new Error('not found');
+}
+
+function loadSample(sample)
+{
+    status('fetching ' + sample.file + ' …');
+    fetchFirst(['../samples/' + sample.file, SAMPLES_RAW + sample.file])
+        .then(buffer => open(buffer, sample.file))
+        .catch(problem => status('cannot fetch ' + sample.file + ': ' + problem.message, true));
+}
+
+for (const sample of SAMPLES)
+{
+    const button = document.createElement('button');
+    button.textContent = sample.label;
+    button.title = 'Load ' + sample.file;
+    button.addEventListener('click', () => loadSample(sample));
+    ui('samples').appendChild(button);
+}
+
 function openFile(file) { file.arrayBuffer().then(b => open(b, file.name)); }
 
 ui('file').addEventListener('change', e => { if (e.target.files[0]) { openFile(e.target.files[0]); } });
@@ -467,13 +514,16 @@ try
     renderer = new Renderer(canvas);
     requestAnimationFrame(tick);
 
-    /* Served over http, the committed sample sits one directory up.  Opened
-     * straight off the filesystem this fetch is blocked, which is not an
-     * error worth shouting about -- drag a container in instead. */
-    const url = new URLSearchParams(location.search).get('url') || '../samples/summerlove_0.arfz';
-    fetch(url)
-        .then(response => response.ok ? response.arrayBuffer() : Promise.reject(new Error(response.status + ' ' + response.statusText)))
-        .then(buffer => open(buffer, url.split('/').pop()))
+    /* ?url= overrides; otherwise open the first committed sample, looking
+     * beside the page before falling back to the repository.  Straight off the
+     * filesystem both fetches are blocked, which is not an error worth
+     * shouting about -- drag a container in instead. */
+    const requested = new URLSearchParams(location.search).get('url');
+    const candidates = requested ? [requested]
+                                 : ['../samples/' + SAMPLES[0].file, SAMPLES_RAW + SAMPLES[0].file];
+
+    fetchFirst(candidates)
+        .then(buffer => open(buffer, candidates[0].split('/').pop()))
         .catch(() => status('drag a .arfz container onto this page, or use the file button'));
 }
 catch (problem)

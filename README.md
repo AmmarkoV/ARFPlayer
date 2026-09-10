@@ -10,6 +10,14 @@ and C++ bindings that wrap the same C API without copying anything.
 
 ![arfplay playing a container](doc/demo.gif)
 
+**[github.com/AmmarkoV/ARFPlayer](https://github.com/AmmarkoV/ARFPlayer)** ·
+[sample containers](https://github.com/AmmarkoV/ARFPlayer/tree/main/samples)
+
+> **Where do `.arfz` files come from?** Convert a video or a live webcam to ARF
+> with **[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)** — run it
+> with `--arf out.arfz` and it writes one container per tracked person. That is
+> the producer this player reads.
+
 ## ⚠ Not a conformant ARF implementation
 
 This reads and writes **SAM3DBody-flavoured ARF**, matching the writer in
@@ -67,7 +75,9 @@ download. Every command in this README uses it.
 
 It is one tracked person out of `summerlove.mp4` in
 [SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp), exported with
-`--arf`. This export is clean — `--info` reports no glitch frames and the
+`--arf`. More containers land in
+[`samples/`](https://github.com/AmmarkoV/ARFPlayer/tree/main/samples) as they
+are made, and the browser player offers them as one-click loads. This export is clean — `--info` reports no glitch frames and the
 skeleton never exceeds 37°/frame — so it plays through without any repair. See
 [Glitch frames](#glitch-frames) for the failure mode earlier exports had.
 
@@ -176,10 +186,15 @@ python3 -m http.server        # from the repository root
 # then open http://localhost:8000/web/
 ```
 
-It loads `samples/summerlove_0.arfz` by default; `?url=` points it at another
-container. Opening `web/index.html` straight off the filesystem works too —
-the fetch is blocked there, so drag a `.arfz` onto the page or use *open*
-instead.
+The page carries one-click buttons for every container in
+[`samples/`](https://github.com/AmmarkoV/ARFPlayer/tree/main/samples). Each is
+fetched from beside the page first, so a local checkout serves its own copy and
+works offline, and falls back to the repository — GitHub serves raw files with
+an open CORS policy, so the buttons work wherever the page is hosted. `?url=`
+points it at any other container.
+
+Opening `web/index.html` straight off the filesystem works too, but both
+fetches are blocked there, so drag a `.arfz` onto the page or use *open*.
 
 Same controls as the desktop player: drag to orbit, right-drag to pan, wheel to
 zoom, space to play, arrows to step, `r` to reset the camera, and the timeline
@@ -352,7 +367,15 @@ The writer emits none of these, so there is nothing to read: ISOBMFF
 containers, RTP streaming, `MPEG_node_avatar` glTF scene integration,
 protection/DRM, landmark sets, texture sets, LoDs, `AnimationLink` conversion.
 
+## See also
+
+* **[SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)** — the producer.
+  Video or webcam in, `.arfz` out (`--arf`), plus BVH export and humanoid-robot
+  retargeting.
+* **[ARFPlayer](https://github.com/AmmarkoV/ARFPlayer)** — this project.
+  [Sample containers](https://github.com/AmmarkoV/ARFPlayer/tree/main/samples).
+
 ## License
 
-MIT — see [LICENSE](LICENSE). Vendored and derived material is listed in
-[NOTICE](NOTICE).
+MIT — see [LICENSE](LICENSE). Derived material and linked dependencies are
+listed in [NOTICE](NOTICE).
