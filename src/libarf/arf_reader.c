@@ -201,6 +201,25 @@ static const char *arfResolveDataURI(const struct arfJsonValue *dataArray, int i
     return 0;
 }
 
+/** @brief Resolve a component reference (a data[].id, numeric) to its
+ *  data[].type (MIME) string.  @retval the type, or 0 if the id is not listed */
+static const char *arfResolveDataType(const struct arfJsonValue *dataArray, int id)
+{
+    if (id < 0) { return 0; }
+
+    for (unsigned int i=0; i<arfJsonCount(dataArray); i++)
+    {
+        const struct arfJsonValue *item = arfJsonAt(dataArray,i);
+        const struct arfJsonValue *itemId = arfJsonMember(item,"id");
+
+        if ( (itemId!=0) && ((int) arfJsonNumber(itemId,-1.0) == id) )
+        {
+            return arfJsonString(arfJsonMember(item,"type"),0);
+        }
+    }
+    return 0;
+}
+
 /** @brief Check every data item's byteLength against the real entry size.
  *  A mismatch means the JSON and the binaries came from different runs.
  *  @retval 1 if consistent */
@@ -830,6 +849,69 @@ static int arfLoadLandmarks(struct arfAvatar *avatar, zip_t *archive,
     return 1;
 }
 
+/** @brief Load the optional texture set: a base material image plus its
+ *  texture targets, carried as opaque bytes -- this library never decodes
+ *  them.  There is no AAU counterpart to load alongside this, unlike
+ *  BlendshapeSet/LandmarkSet: TextureSet has no animation stream in the
+ *  spec, so this is the whole of it. */
+static int arfLoadTextureSet(struct arfAvatar *avatar, zip_t *archive,
+                             const struct arfJsonValue *set, const struct arfJsonValue *dataArray)
+{
+    const char *name = arfJsonString(arfJsonMember(set,"name"),"textureSet0");
+    snprintf(avatar->textureSet.name,sizeof(avatar->textureSet.name),"%s",name);
+
+    int materialId = (int) arfJsonNumber(arfJsonMember(set,"material"),-1.0);
+    const char *materialURI  = arfResolveDataURI(dataArray,materialId);
+    const char *materialType = arfResolveDataType(dataArray,materialId);
+    if (materialURI==0) { arfSetError("textureSet.material (data id %d) does not resolve to a data item",materialId); return 0; }
+
+    size_t size = 0;
+    void  *bytes = arfExtractEntry(archive,materialURI,&size);
+    if (bytes==0) { return 0; }
+
+    avatar->textureSet.materialBytes  = bytes;   /* opaque, ownership transferred */
+    avatar->textureSet.materialLength = size;
+    snprintf(avatar->textureSet.materialMimeType,sizeof(avatar->textureSet.materialMimeType),
+            "%s",materialType ? materialType : "");
+
+    const struct arfJsonValue *targets = arfJsonMember(set,"targets");
+    unsigned int count = arfJsonCount(targets);
+    if (count==0) { arfSetError("textureSet.targets is empty or missing"); return 0; }
+
+    avatar->textureSet.targets = (struct arfTextureTarget *) calloc(count,sizeof(struct arfTextureTarget));
+    if (avatar->textureSet.targets==0) { arfSetError("out of memory allocating %u texture targets",count); return 0; }
+    avatar->textureSet.numberOfTargets = count;
+
+    for (unsigned int i=0; i<count; i++)
+    {
+        const struct arfJsonValue *target = arfJsonAt(targets,i);
+        struct arfTextureTarget *destination = &avatar->textureSet.targets[i];
+
+        const char *targetName = arfJsonString(arfJsonMember(target,"name"),0);
+        if (targetName==0) { arfSetError("textureSet.targets[%u] has no name",i); return 0; }
+        snprintf(destination->name,sizeof(destination->name),"%s",targetName);
+
+        int textureId = (int) arfJsonNumber(arfJsonMember(target,"texture"),-1.0);
+        const char *textureURI  = arfResolveDataURI(dataArray,textureId);
+        const char *textureType = arfResolveDataType(dataArray,textureId);
+        if (textureURI==0)
+        {
+            arfSetError("textureSet.targets[%u].texture (data id %d) does not resolve to a data item",i,textureId);
+            return 0;
+        }
+
+        size_t tsize = 0;
+        void  *tbytes = arfExtractEntry(archive,textureURI,&tsize);
+        if (tbytes==0) { return 0; }
+
+        destination->bytes  = tbytes;
+        destination->length = tsize;
+        snprintf(destination->mimeType,sizeof(destination->mimeType),"%s",textureType ? textureType : "");
+    }
+
+    return 1;
+}
+
 
 /* ===========================================================================
  *  Animation streams
@@ -1329,6 +1411,28 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
         avatar->hasLandmarks = 1;
     }
 
+    /* Texture set, if this container carries one.  TextureSet has no
+     * baseMesh/mesh field of its own -- skins[0].textureSet is the only
+     * link tying it to anything, so that's what gets cross-checked here,
+     * the reverse direction from the mesh/skeleton/blendshapeSet checks
+     * above. */
+    const struct arfJsonValue *textureSet = arfJsonAt(arfJsonMember(components,"textureSets"),0);
+
+    if (textureSet!=0)
+    {
+        int textureSetId = (int) arfJsonNumber(arfJsonMember(textureSet,"id"),-5.0);
+        int skinTextureSet = (int) arfJsonNumber(arfJsonMember(skin,"textureSet"),-1.0);
+        if (skinTextureSet != textureSetId)
+        {
+            arfSetError("skins[0].textureSet is %d, expected %d (textureSets[0].id)",skinTextureSet,textureSetId);
+            goto failed;
+        }
+
+        if (!arfLoadTextureSet(avatar,archive,textureSet,dataArray)) { goto failed; }
+
+        avatar->hasTextureSet = 1;
+    }
+
     if (arfRebuildSkinIndex(avatar)!=ARF_OK) { goto failed; }
 
     arfJsonFree(document);
@@ -1395,6 +1499,12 @@ void arfFree(struct arfAvatar *avatar)
     free(avatar->landmarks.vertexIndex);
     free(avatar->landmarkTimestamp);
     free(avatar->landmarkPositions);
+    free(avatar->textureSet.materialBytes);
+    for (unsigned int i=0; i<avatar->textureSet.numberOfTargets; i++)
+    {
+        free(avatar->textureSet.targets[i].bytes);
+    }
+    free(avatar->textureSet.targets);
     free(avatar);
 }
 
@@ -1501,5 +1611,16 @@ void arfPrintInfo(const struct arfAvatar *avatar)
     else
     {
         printf("landmark track: absent\n");
+    }
+
+    if (avatar->hasTextureSet)
+    {
+        printf("texture set   : \"%s\", material %zu bytes (%s), %u target(s)\n",
+               avatar->textureSet.name,avatar->textureSet.materialLength,
+               avatar->textureSet.materialMimeType,avatar->textureSet.numberOfTargets);
+    }
+    else
+    {
+        printf("texture set   : absent\n");
     }
 }

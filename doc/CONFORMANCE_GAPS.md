@@ -20,18 +20,18 @@ to change to produce containers this project can read conformantly — see
 "upstream issue" spirit as [`doc/UPSTREAM_ISSUE.md`](UPSTREAM_ISSUE.md).
 
 **Status: Milestone 1 (numeric-id component graph), Milestone 2 (AAU
-bitstream) and Milestone 3 (`LandmarkSet`/`AAU_LANDMARK`) are implemented.**
-`structure` as Asset/LOD and the `id_map.txt` sidecar are done;
-`samples/summerlove_0.arfz` has been regenerated across the milestones that
-changed its shape -- all clean cutovers, the reader no longer accepts a
-pre-rewrite shape at all. `LandmarkSet` has no real tracking data source in
-this codebase, so it was verified with a synthetic round trip through the
-Python bindings (`enable_landmarks()`/`append_landmark_frame()`) rather than
-against a real sample -- see that section for details. Sections below are
-marked `[done]` or `[pending]` accordingly. Still pending:
-`TextureSet`/`TextureTarget`, `BlendshapeSet` shapes as GLB. The skin-weight
-tensor stays sparse for now, a deliberate choice, not an oversight — see
-that section.
+bitstream), Milestone 3 (`LandmarkSet`/`AAU_LANDMARK`) and Milestone 4
+(`TextureSet`/`TextureTarget`) are implemented.** `structure` as Asset/LOD
+and the `id_map.txt` sidecar are done; `samples/summerlove_0.arfz` has been
+regenerated across the milestones that changed its shape -- all clean
+cutovers, the reader no longer accepts a pre-rewrite shape at all.
+`LandmarkSet` and `TextureSet` have no real data source in this codebase
+(no landmark tracking, no textured avatars), so both were verified with
+synthetic round trips through the Python bindings rather than against a real
+sample -- see their sections for details. Sections below are marked
+`[done]` or `[pending]` accordingly. Still pending: `BlendshapeSet` shapes as
+GLB. The skin-weight tensor stays sparse for now, a deliberate choice, not
+an oversight — see that section.
 
 **Bug found and fixed after Milestone 1 shipped:** the General Conventions
 clause states plainly, "All references used in the ARF document are to the
@@ -61,8 +61,9 @@ choice), not document-level `id` references.
 * `[done]` the AAU bitstream (field widths, `AAU_LANDMARK`)
 * `[done]` `LandmarkSet`
 * `[pending]` `BlendshapeSet` shapes as bare-geometry GLB instead of raw delta tensors
-* `[pending]` `TextureSet`/`TextureTarget` (parametric texture blending),
-  declaration-only `AnimationLink` (no cross-framework retargeting runtime)
+* `[done]` `TextureSet`/`TextureTarget`, as a static asset declaration (no
+  AAU counterpart exists to animate it), declaration-only `AnimationLink`
+  (no cross-framework retargeting runtime)
 * `[done]` a non-normative `id_map.txt` sidecar for debugging (new idea, not
   in the spec — see [below](#id_maptxt-sidecar-done))
 
@@ -210,23 +211,54 @@ pattern as `joints.bin`/`face.bin`, with its own profile string,
 body-v1`/`arf-face-v1` pattern, since there was no established one to
 inherit here.
 
-## `TextureSet` / `TextureTarget` — entirely new
+## `TextureSet` / `TextureTarget` `[done]`
 
-Not implemented at all today; this is the "glTF scenes and textures" item
-that's explicitly in scope. `TextureSet` names a material (a numeric
-data-item reference plus a `materialPath` locating the actual texture inside
-that item — most likely a path into a glTF/GLB material), and a list of
-`TextureTarget`s, each of which is itself a reference to a texture plus a
-locating path. `animationInfo` is **mandatory** here (unlike everywhere else
-it's optional), but per the scope decision this can be a minimal declaration
-rather than a functioning cross-framework mapping.
+**Re-scoped on inspection, in a good way.** The original scoping note here
+assumed this would need image decoding (PNG/JPEG), a texture-blend shader
+path, and a GLB/material reader — the most expensive item in the whole
+rewrite. On actually implementing it, two things simplified that a lot:
 
-Practically, this is the most expensive in-scope item: it needs actual image
-decoding (PNG/JPEG — a new dependency this project doesn't currently have),
-a texture-blend shader path in `arf_render.c`, and a GLB/material reader to
-resolve `materialPath`/`texturePath`. It shares the GLB-parsing primitive
-that `BlendshapeSet` needs, so building that primitive once and reusing it
-for both is the efficient order of work.
+1. **There is no AAU unit for texture blend weights.** The Animation Stream
+   Format clause defines exactly three sample formats — facial (blendshape),
+   joint, landmark — and none of them is texture. `TextureSet` is therefore
+   a **static asset declaration**, like `Mesh`/`Skin`, not an animated track
+   like `BlendshapeSet`/`LandmarkSet`. No new AAU type, no runtime blending
+   logic, no shader work.
+2. **`libarf` never needs to decode the images it carries.** `material`/
+   `texture` reference `Data` items exactly like every other tensor
+   reference in this format — the difference is only that their content is
+   opaque image bytes instead of a dense/sparse tensor. `libarf` already
+   treats `mesh_positions.bin` as "bytes with a declared shape," not
+   semantically as geometry; texture bytes get the identical treatment.
+   Decoding pixels is a consumer's job (a renderer), not the container
+   library's — consistent with this project's "depends on nothing but
+   libzip and libm" design, which a PNG/JPEG dependency would have broken.
+
+Implemented: `struct arfTextureSet`/`struct arfTextureTarget` in `arf.h`
+(name + MIME type + opaque byte blob, one material and N targets),
+`components.textureSets[0]` with `name`/`id`/`animationInfo`/`material`/
+`materialPath`/`targets[]`, `skins[0].textureSet` (the only link tying a
+`TextureSet` to anything, since it has no `baseMesh`/mesh field of its own,
+unlike `BlendshapeSet`/`LandmarkSet`), and the write API
+`arfEnableTextureSet()`/`arfAddTextureTarget()`. `data[]` ids for the
+material/targets are the first variable-count case in this format (id 6 for
+the material, 7, 8, ... for each target — every other optional component
+before this one added exactly one fixed data item).
+
+Two conventions invented here, undocumented by the spec text available:
+`animationInfo: []` (mandatory in the spec, but no `AnimationLink` enum
+value means "texture," so an honestly empty array beats a fabricated link),
+and `materialPath`/`texturePath: ""` (they "indicate where the texture can
+be found in the item," for formats where one data item embeds several
+textures — since every data item here is one flat image, there is nothing
+to locate within it).
+
+Verified with a synthetic round trip through the Python bindings: a real,
+valid, freshly-generated PNG (built with nothing but `zlib`/`struct`, no
+image library) as the material, plus two more as texture targets, saved and
+reloaded, comparing every byte against the originals — confirms the
+container carries arbitrary opaque binary content faithfully end to end
+without `libarf` ever parsing PNG.
 
 ## `Data` `[done]`
 
@@ -355,6 +387,13 @@ pre-rewrite shape at all), so `ARFWriter` needs, concretely:
   `id`/`baseMesh`/`vertices` (a dense uint32 tensor of mesh-vertex indices),
   its own `animations/landmarks.bin` with profile `"arf-landmark-v1"`, and
   the `ala_*` field layout in [AAU_LANDMARK](#aau_landmark-done)
+* if textured avatar export is ever added, `components.textureSets` is
+  implemented and waiting too — no AAU stream involved, since there is no
+  animated track for texture blend weights at all. `material`/`targets[].
+  texture` reference plain image `data[]` items (real MIME type, e.g.
+  `image/png`); `skins[0].textureSet` is the only link to add on the
+  `Skin` side. See [TextureSet/TextureTarget](#textureset--texturetarget-done)
+  for the exact JSON shape and the `animationInfo`/`materialPath` conventions
 
 Still open, not yet needed for the two sides to agree on today's shape:
 

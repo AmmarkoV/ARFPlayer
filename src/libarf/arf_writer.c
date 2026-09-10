@@ -265,6 +265,71 @@ int arfAppendLandmarkFrame(struct arfAvatar *avatar, unsigned int timestamp, con
     return ARF_OK;
 }
 
+/** @brief Attach a texture set.  Bytes are copied; this library never
+ *  decodes them, and there is no per-frame track to append to afterwards --
+ *  TextureSet has no AAU counterpart, see arf_format.h. */
+int arfEnableTextureSet(struct arfAvatar *avatar, const char *name,
+                        const void *materialBytes, size_t materialLength, const char *materialMimeType)
+{
+    if ( (avatar==0) || (name==0) || (materialBytes==0) || (materialLength==0) )
+    {
+        arfSetError("no avatar, name, material bytes or length were given");
+        return ARF_ERROR_ARGUMENT;
+    }
+
+    free(avatar->textureSet.materialBytes);
+    avatar->textureSet.materialBytes = malloc(materialLength);
+    if (avatar->textureSet.materialBytes==0)
+    {
+        arfSetError("out of memory allocating %zu material bytes",materialLength);
+        return ARF_ERROR_MEMORY;
+    }
+
+    memcpy(avatar->textureSet.materialBytes,materialBytes,materialLength);
+    avatar->textureSet.materialLength = materialLength;
+    snprintf(avatar->textureSet.name,sizeof(avatar->textureSet.name),"%s",name);
+    snprintf(avatar->textureSet.materialMimeType,sizeof(avatar->textureSet.materialMimeType),
+            "%s",materialMimeType ? materialMimeType : "");
+    avatar->hasTextureSet = 1;
+
+    return ARF_OK;
+}
+
+int arfAddTextureTarget(struct arfAvatar *avatar, const char *name,
+                        const void *bytes, size_t length, const char *mimeType)
+{
+    if ( (avatar==0) || (name==0) || (bytes==0) || (length==0) )
+    {
+        arfSetError("no avatar, name, bytes or length were given");
+        return ARF_ERROR_ARGUMENT;
+    }
+    if (!avatar->hasTextureSet)
+    {
+        arfSetError("call arfEnableTextureSet() before adding texture targets");
+        return ARF_ERROR_ARGUMENT;
+    }
+
+    unsigned int index = avatar->textureSet.numberOfTargets;
+    struct arfTextureTarget *grown = (struct arfTextureTarget *) realloc(
+        avatar->textureSet.targets,(size_t) (index+1) * sizeof(struct arfTextureTarget));
+    if (grown==0) { arfSetError("out of memory growing to %u texture targets",index+1); return ARF_ERROR_MEMORY; }
+    avatar->textureSet.targets = grown;
+
+    struct arfTextureTarget *destination = &avatar->textureSet.targets[index];
+    memset(destination,0,sizeof(*destination));
+
+    snprintf(destination->name,sizeof(destination->name),"%s",name);
+    snprintf(destination->mimeType,sizeof(destination->mimeType),"%s",mimeType ? mimeType : "");
+
+    destination->bytes = malloc(length);
+    if (destination->bytes==0) { arfSetError("out of memory allocating %zu texture target bytes",length); return ARF_ERROR_MEMORY; }
+    memcpy(destination->bytes,bytes,length);
+    destination->length = length;
+
+    avatar->textureSet.numberOfTargets++;
+    return ARF_OK;
+}
+
 
 /* ===========================================================================
  *  Tensor and stream encoding
@@ -532,8 +597,9 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
      * the fixed paths in arf_format.h per the Zip-container clause. */
     arfJsonText(buffer,"  \"structure\": {\"assets\": [{\"name\": \"body\", \"isMain\": true, \"lods\": [\n");
     arfJsonText(buffer,"    {\"name\": \"lod0\", \"skins\": [0], \"meshes\": [0], \"skeletons\": [0]");
-    if (avatar->hasFace)      { arfJsonText(buffer,", \"blendshapeSets\": [0]"); }
-    if (avatar->hasLandmarks) { arfJsonText(buffer,", \"landmarkSets\": [0]"); }
+    if (avatar->hasFace)       { arfJsonText(buffer,", \"blendshapeSets\": [0]"); }
+    if (avatar->hasLandmarks)  { arfJsonText(buffer,", \"landmarkSets\": [0]"); }
+    if (avatar->hasTextureSet) { arfJsonText(buffer,", \"textureSets\": [0]"); }
     arfJsonText(buffer,"}\n  ]}]},\n");
 
     arfJsonText(buffer,"  \"components\": {\n");
@@ -601,6 +667,9 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
     arfJsonText(buffer,"    \"skins\": [{\"id\": 0, \"name\": \"skin0\", \"mapping\": \"skin0\", "
                        "\"skeleton\": 0, \"mesh\": 0, \"weights\": ");
     arfJsonUnsigned(buffer,ARF_DATA_ID_SKIN_WEIGHTS);
+    /* TextureSet has no baseMesh/mesh field of its own, so skins[0].textureSet
+     * is the only link tying it to anything -- see arf_format.h. */
+    if (avatar->hasTextureSet) { arfJsonText(buffer,", \"textureSet\": 0"); }
     arfJsonText(buffer,"}],\n");
 
     arfJsonText(buffer,"    \"meshes\": [{\"id\": 0, \"name\": \"mesh0\", \"path\": \"mesh0\", \"data\": [");
@@ -625,25 +694,77 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
         arfJsonText(buffer,"}]");
     }
 
+    if (avatar->hasTextureSet)
+    {
+        /* animationInfo is mandatory in the spec but nothing here is
+         * parametrically driven, so it's an honestly empty array rather
+         * than a fabricated link -- see arf_format.h. materialPath/
+         * texturePath are "" for the same reason: every data item here is
+         * one flat image, nothing to locate within it. */
+        arfJsonText(buffer,",\n    \"textureSets\": [{\"id\": 0, \"name\": ");
+        arfJsonQuoted(buffer,avatar->textureSet.name);
+        arfJsonText(buffer,", \"animationInfo\": [], \"material\": ");
+        arfJsonUnsigned(buffer,ARF_DATA_ID_TEXTURE_MATERIAL);
+        arfJsonText(buffer,", \"materialPath\": \"\", \"targets\": [");
+
+        for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
+        {
+            if (t>0) { arfJsonText(buffer,", "); }
+            arfJsonText(buffer,"{\"id\": ");
+            arfJsonUnsigned(buffer,t);
+            arfJsonText(buffer,", \"name\": ");
+            arfJsonQuoted(buffer,avatar->textureSet.targets[t].name);
+            arfJsonText(buffer,", \"texture\": ");
+            arfJsonUnsigned(buffer,ARF_DATA_ID_TEXTURE_TARGET_FIRST + t);
+            arfJsonText(buffer,", \"texturePath\": \"\"}");
+        }
+
+        arfJsonText(buffer,"]}]");
+    }
+
     arfJsonText(buffer,"\n  },\n");
+
+    /* isLast tracks whether each data[] entry below is the final one --
+     * texture items, being the newest optional feature, are appended after
+     * everything else, so they take over "last" whenever present. */
+    int lastIsLandmark = avatar->hasLandmarks && !avatar->hasTextureSet;
+    int lastIsFace      = avatar->hasFace && !avatar->hasLandmarks && !avatar->hasTextureSet;
+    int lastIsInverseBind = !avatar->hasFace && !avatar->hasLandmarks && !avatar->hasTextureSet;
 
     arfJsonText(buffer,"  \"data\": [\n");
     arfJsonDataItem(buffer,ARF_DATA_ID_MESH_POSITIONS,ARF_ID_MESH_POSITIONS,ARF_ENTRY_MESH_POSITIONS,ARF_MIME_DENSE, positionsBytes,  0);
     arfJsonDataItem(buffer,ARF_DATA_ID_MESH_INDICES,  ARF_ID_MESH_INDICES,  ARF_ENTRY_MESH_INDICES,  ARF_MIME_DENSE, indicesBytes,    0);
     arfJsonDataItem(buffer,ARF_DATA_ID_SKIN_WEIGHTS,  ARF_ID_SKIN_WEIGHTS,  ARF_ENTRY_SKIN_WEIGHTS,  ARF_MIME_SPARSE,weightsBytes,    0);
-    arfJsonDataItem(buffer,ARF_DATA_ID_INVERSE_BIND,  ARF_ID_INVERSE_BIND,  ARF_ENTRY_INV_BIND_POSE, ARF_MIME_DENSE, inverseBindBytes,
-                    !avatar->hasFace && !avatar->hasLandmarks);
+    arfJsonDataItem(buffer,ARF_DATA_ID_INVERSE_BIND,  ARF_ID_INVERSE_BIND,  ARF_ENTRY_INV_BIND_POSE, ARF_MIME_DENSE, inverseBindBytes,lastIsInverseBind);
 
     if (avatar->hasFace)
     {
         arfJsonDataItem(buffer,ARF_DATA_ID_FACE_DELTAS,ARF_ID_FACE_DELTAS,ARF_ENTRY_FACE_DELTAS,ARF_MIME_DENSE,
-                        deltaBytes,!avatar->hasLandmarks);
+                        deltaBytes,lastIsFace);
     }
 
     if (avatar->hasLandmarks)
     {
         arfJsonDataItem(buffer,ARF_DATA_ID_LANDMARK_VERTICES,ARF_ID_LANDMARK_VERTICES,ARF_ENTRY_LANDMARK_VERTICES,
-                        ARF_MIME_DENSE,landmarkVerticesBytes,1);
+                        ARF_MIME_DENSE,landmarkVerticesBytes,lastIsLandmark);
+    }
+
+    if (avatar->hasTextureSet)
+    {
+        char name[ARF_MAX_NAME + 32];
+        char entry[64];
+
+        arfJsonDataItem(buffer,ARF_DATA_ID_TEXTURE_MATERIAL,ARF_ID_TEXTURE_MATERIAL,ARF_ENTRY_TEXTURE_MATERIAL,
+                        avatar->textureSet.materialMimeType,avatar->textureSet.materialLength,0);
+
+        for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
+        {
+            snprintf(name,sizeof(name),ARF_ID_TEXTURE_TARGET_FORMAT,t);
+            snprintf(entry,sizeof(entry),ARF_ENTRY_TEXTURE_TARGET_FORMAT,t);
+            arfJsonDataItem(buffer,ARF_DATA_ID_TEXTURE_TARGET_FIRST + t,name,entry,
+                            avatar->textureSet.targets[t].mimeType,avatar->textureSet.targets[t].length,
+                            (t+1==avatar->textureSet.numberOfTargets));
+        }
     }
 
     arfJsonText(buffer,"  ]\n}\n");
@@ -673,6 +794,18 @@ static void arfWriteIdMap(struct arfBuffer *buffer, const struct arfAvatar *avat
     {
         arfJsonText(buffer,"landmarkSet\t0\t" ARF_LANDMARK_SET_ID "\n");
     }
+
+    if (avatar->hasTextureSet)
+    {
+        snprintf(line,sizeof(line),"textureSet\t0\t%s\n",avatar->textureSet.name);
+        arfBufferAppend(buffer,line,strlen(line));
+
+        for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
+        {
+            snprintf(line,sizeof(line),"textureTarget\t%u\t%s\n",t,avatar->textureSet.targets[t].name);
+            arfBufferAppend(buffer,line,strlen(line));
+        }
+    }
 }
 
 
@@ -693,6 +826,38 @@ static int arfAddEntry(zip_t *archive, const char *name, const struct arfBuffer 
     if (buffer->failed) { arfSetError("ran out of memory encoding \"%s\"",name); return 0; }
 
     zip_source_t *source = zip_source_buffer(archive,buffer->data,buffer->length,0);
+    if (source==0)
+    {
+        arfSetError("could not stage \"%s\": %s",name,zip_strerror(archive));
+        return 0;
+    }
+
+    zip_int64_t index = zip_file_add(archive,name,source,ZIP_FL_OVERWRITE | ZIP_FL_ENC_UTF_8);
+    if (index < 0)
+    {
+        arfSetError("could not add \"%s\" to the container: %s",name,zip_strerror(archive));
+        zip_source_free(source);
+        return 0;
+    }
+
+    if (zip_set_file_compression(archive,(zip_uint64_t) index,ZIP_CM_DEFLATE,1) != 0)
+    {
+        arfSetError("could not set compression on \"%s\": %s",name,zip_strerror(archive));
+        return 0;
+    }
+
+    return 1;
+}
+
+/** @brief Add one entry straight from a caller-owned buffer -- for texture
+ *  material/target bytes, which are already sitting fully formed in
+ *  avatar->textureSet (no tensor header or AAU framing to build around
+ *  them, unlike every other entry here), so there is nothing to stage in
+ *  an arfBuffer first. The bytes must outlive zip_close(), same as
+ *  arfAddEntry()'s buffers; avatar, and so avatar->textureSet, does. */
+static int arfAddOpaqueEntry(zip_t *archive, const char *name, const void *bytes, size_t length)
+{
+    zip_source_t *source = zip_source_buffer(archive,bytes,length,0);
     if (source==0)
     {
         arfSetError("could not stage \"%s\": %s",name,zip_strerror(archive));
@@ -804,6 +969,26 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     {
         if (!arfAddEntry(archive,ARF_ENTRY_LANDMARK_VERTICES,&landmarkVertices)) { goto cleanup; }
         if (!arfAddEntry(archive,ARF_ENTRY_LANDMARK_STREAM,&landmarkStream))     { goto cleanup; }
+    }
+
+    if (avatar->hasTextureSet)
+    {
+        if (!arfAddOpaqueEntry(archive,ARF_ENTRY_TEXTURE_MATERIAL,
+                               avatar->textureSet.materialBytes,avatar->textureSet.materialLength))
+        {
+            goto cleanup;
+        }
+
+        for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
+        {
+            char entry[64];
+            snprintf(entry,sizeof(entry),ARF_ENTRY_TEXTURE_TARGET_FORMAT,t);
+
+            if (!arfAddOpaqueEntry(archive,entry,avatar->textureSet.targets[t].bytes,avatar->textureSet.targets[t].length))
+            {
+                goto cleanup;
+            }
+        }
     }
 
     /* Everything is written here, reading the staged buffers, so this has to

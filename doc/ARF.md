@@ -17,11 +17,11 @@ stops loading.
 
 ARF is ISO/IEC 23090-39 (MPEG-I Part 39). `libarf`'s `arf.json` component
 graph — numeric ids resolved by matching value, not array position;
-`structure` as Asset/LOD; `LandmarkSet` — and the AAU animation-stream
-bitstream (field widths, big-endian byte order, `AAU_LANDMARK`) have been
-checked against the FDIS-stage text and match it; see
-[`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting of
-what was changed and why. Still outstanding, and still this project's own
+`structure` as Asset/LOD; `LandmarkSet`; `TextureSet`/`TextureTarget` — and
+the AAU animation-stream bitstream (field widths, big-endian byte order,
+`AAU_LANDMARK`) have been checked against the FDIS-stage text and match it;
+see [`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting
+of what was changed and why. Still outstanding, and still this project's own
 convention rather than verified spec values: the sparse skin-weight tensor
 (the spec only defines a dense one), and `BlendshapeSet.shapes` as one
 combined raw delta tensor rather than per-shape embedded GLB targets.
@@ -66,12 +66,22 @@ ISOBMFF/MPEG-2 Systems use, where it means big-endian — see
 │   ├── skin_weights.bin        sparse dims [n_verts, n_joints]
 │   ├── inv_bind_pose.bin       dense  [n_joints, 16]          float32
 │   ├── face_blendshapes.bin    dense  [n_shapes, n_verts, 3]  float32   (optional)
-│   └── landmark_vertices.bin   dense  [n_landmarks]           uint32   (optional)
+│   ├── landmark_vertices.bin   dense  [n_landmarks]           uint32   (optional)
+│   ├── texture_material.bin    opaque image bytes                     (optional)
+│   └── texture_target_<i>.bin  opaque image bytes, one per target     (optional)
 └── animations/
     ├── joints.bin              AAU_CONFIG + one AAU_JOINT per frame
     ├── face.bin                AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
     └── landmarks.bin           AAU_CONFIG + one AAU_LANDMARK per frame (optional)
 ```
+
+`texture_material.bin`/`texture_target_*.bin` carry no header of their own —
+their `data[].type` is a real image MIME type (e.g. `image/png`), and
+`libarf` never decodes them, the same way it never interprets
+`mesh_positions.bin` as "a mesh": it validates shape/bytes, a consumer gives
+them meaning. There is no `animations/textures.bin` — `TextureSet` has no
+AAU counterpart (see "Avatar Animation Units" below), so it is a static
+asset reference, not an animated track.
 
 One container is one tracked person. For a pipeline-produced container the
 numbers are `n_verts` 18439, `n_tris` 36874, `n_joints` 127, sparse skin
@@ -125,7 +135,8 @@ components.skeletons: [ { id: 0, name: "skeleton0", root: <root node id>,
                           inverseBindMatrix: <data id> } ]
 
 components.skins:     [ { id: 0, name: "skin0", mapping: <path>,
-                          skeleton: <skeleton id>, mesh: <mesh id>, weights: <data id> } ]
+                          skeleton: <skeleton id>, mesh: <mesh id>, weights: <data id>,
+                          (textureSet: <textureSet id>) } ]
 
 components.meshes:    [ { id: 0, name: "mesh0", path: <path>,
                           data: [<positions data id>, <indices data id>] } ]
@@ -136,21 +147,40 @@ components.blendshapeSets: [ { id: 0, name: "face_expression", baseMesh: <mesh i
 components.landmarkSets: [ { id: 0, name: "landmarks", baseMesh: <mesh id>,
                              vertices: <data id> } ]  // optional
 
+components.textureSets: [ { id: 0, name: <string>, animationInfo: [],
+                            material: <data id>, materialPath: "",
+                            targets: [ { id: <number>, name: <string>,
+                                         texture: <data id>, texturePath: "" } ] } ]  // optional
+
 data: [ { id: <number>, name: <string>, uri, type, byteLength } ]
 ```
 
-`type` is `application/mpeg.arf.dense` or `application/mpeg.arf.sparse` (the
-sparse one is this project's own extension — see "Sparse tensor" below).
-Component references such as a `weights` or `inverseBindMatrix` field are
-numbers that resolve against `data[].id`, and the entry's `uri` names the ZIP
-entry.
+`type` is `application/mpeg.arf.dense` or `application/mpeg.arf.sparse` for
+tensors (the sparse one is this project's own extension — see "Sparse
+tensor" below), or a real image MIME type (e.g. `application/mpeg.arf.dense`
+does not apply) for `TextureSet` material/target entries, which are opaque
+image bytes, not tensors. Component references such as a `weights` or
+`inverseBindMatrix` field are numbers that resolve against `data[].id`, and
+the entry's `uri` names the ZIP entry.
+
+`TextureSet` has no `baseMesh`/mesh field of its own; `skins[0].textureSet`
+is the only link tying it to anything, so it is emitted (unlike
+`Skin.blendshapeSet`/`landmarkSet`, skipped as redundant with
+`BlendshapeSet`/`LandmarkSet`'s own `baseMesh`). `animationInfo` is
+mandatory on `TextureSet` in the spec, but no `AnimationLink` enum value
+means "texture," so it is emitted as an honestly empty array rather than a
+fabricated link. `materialPath`/`texturePath` exist for formats where one
+data item embeds several textures (e.g. a GLB material); since every data
+item here is one flat image with nothing to locate within it, both are `""`
+— this project's own convention for that case, the same kind of choice as
+`Mesh.data`'s slot order.
 
 `mesh.data`'s slot order (`[0]`=positions, `[1]`=indices) and `node.mapping`/
 `skin.mapping`/`mesh.path` (this project has no verified taxonomy for the
 semantic scene-graph paths the spec's companion scene-description part
-defines, so a node's own name is used as an honest placeholder) are this
-library's own documented convention — see `arf_format.h` and
-`doc/CONFORMANCE_GAPS.md`.
+defines, so a node's own name is used as an honest placeholder) are also
+this library's own documented convention — see `arf_format.h` and
+`doc/CONFORMANCE_GAPS.md` for this and the `TextureSet` conventions above.
 
 ### What a reader must check
 
@@ -352,8 +382,9 @@ that shows the glitch.
 ## `id_map.txt` (non-normative)
 
 A flat `<type>\t<id>\t<name>` line per component (`node`, `mesh`, `skin`,
-`skeleton`, `blendshapeSet`, `landmarkSet`), so a raw `AAU_JOINT` stream's
-numeric joint indices can be matched to a name without a JSON parser. Every
+`skeleton`, `blendshapeSet`, `landmarkSet`, `textureSet`, `textureTarget`),
+so a raw `AAU_JOINT` stream's numeric joint indices can be matched to a name
+without a JSON parser. Every
 component already carries its own mandatory `name` in `arf.json` — this is
 purely a debugging convenience, never referenced from `data[]`/`structure`/
 `components`, and a conformant reader has no reason to open it.
@@ -362,5 +393,5 @@ purely a debugging convenience, never referenced from `data[]`/`structure`/
 
 The writer produces none of these, so a reader has nothing to handle: ISOBMFF
 containers, RTP payload streaming, `MPEG_node_avatar` glTF scene integration,
-authentication/biometrics, protection/DRM, texture sets and texture
-animation, LoDs, and `AnimationLink`/`mapping` framework-conversion objects.
+authentication/biometrics, protection/DRM, LoDs, and `AnimationLink`/`mapping`
+framework-conversion objects.

@@ -240,6 +240,7 @@ public:
     unsigned int root_node()      const noexcept { return avatar_->rootNode; }
     bool         has_face()       const noexcept { return avatar_->hasFace != 0; }
     bool         has_landmarks()  const noexcept { return avatar_->hasLandmarks != 0; }
+    bool         has_texture_set() const noexcept { return avatar_->hasTextureSet != 0; }
 
     /** @brief Ticks per second, which for these containers is frames per second. */
     float timescale() const noexcept { return avatar_->timescale; }
@@ -364,6 +365,25 @@ public:
     void append_landmark_frame(unsigned int timestamp, const float *positions)
     {
         detail::check(arfAppendLandmarkFrame(avatar_, timestamp, positions), "appending a landmark frame");
+    }
+
+    /** @brief Attach a texture set: an opaque base material image, carried
+     *  but never decoded (there is no per-frame track -- TextureSet has no
+     *  AAU counterpart). */
+    void enable_texture_set(const std::string &name, const void *material_bytes,
+                            std::size_t material_length, const std::string &material_mime_type)
+    {
+        detail::check(arfEnableTextureSet(avatar_, name.c_str(), material_bytes, material_length,
+                                          material_mime_type.c_str()),
+                      "enabling the texture set");
+    }
+
+    /** @brief Append one texture target: another opaque image blend target. */
+    void add_texture_target(const std::string &name, const void *bytes,
+                            std::size_t length, const std::string &mime_type)
+    {
+        detail::check(arfAddTextureTarget(avatar_, name.c_str(), bytes, length, mime_type.c_str()),
+                      "adding a texture target");
     }
 
     void save(const std::string &path) const

@@ -41,11 +41,21 @@ extern "C"
  *    data/inv_bind_pose.bin      dense  [n_joints, 16]         float32
  *    data/face_blendshapes.bin   dense  [n_shapes, n_verts, 3] float32  (optional)
  *    data/landmark_vertices.bin  dense  [n_landmarks]          uint32   (optional)
+ *    data/texture_material.bin   opaque image bytes                     (optional)
+ *    data/texture_target_<i>.bin opaque image bytes, one per target     (optional)
  *    animations/joints.bin       AAU_CONFIG + one AAU_JOINT per frame
  *    animations/face.bin         AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
  *    animations/landmarks.bin    AAU_CONFIG + one AAU_LANDMARK per frame (optional)
  *
  *  Every integer and float in the binary payloads is little-endian.
+ *
+ *  Texture material/target data items are opaque: their data[].type carries
+ *  a real image MIME type (e.g. "image/png"), and this library never decodes
+ *  them, the same way it never interprets mesh_positions.bin as "a mesh" --
+ *  it validates shape/bytes, a consumer gives them meaning. There is no AAU
+ *  unit for texture blend weights (TextureSet has no counterpart in the
+ *  Animation Stream Format clause, unlike BlendshapeSet/LandmarkSet), so a
+ *  texture set is a static asset reference, not an animated track.
  *
  *  arf.json's `structure`/`components` use numeric ids: every component's id
  *  is its index within its own components.<array>, e.g. components.nodes[i]
@@ -63,6 +73,11 @@ extern "C"
 #define ARF_ENTRY_INV_BIND_POSE   "data/inv_bind_pose.bin"
 #define ARF_ENTRY_FACE_DELTAS     "data/face_blendshapes.bin"
 #define ARF_ENTRY_LANDMARK_VERTICES "data/landmark_vertices.bin"
+#define ARF_ENTRY_TEXTURE_MATERIAL  "data/texture_material.bin"
+/* sprintf(name, ARF_ENTRY_TEXTURE_TARGET_FORMAT, targetIndex) -- one file per
+ * texture target, since the count is variable, unlike every other data item
+ * here which is fixed at one instance. */
+#define ARF_ENTRY_TEXTURE_TARGET_FORMAT "data/texture_target_%u.bin"
 #define ARF_ENTRY_JOINT_STREAM    "animations/joints.bin"
 #define ARF_ENTRY_FACE_STREAM     "animations/face.bin"
 #define ARF_ENTRY_LANDMARK_STREAM "animations/landmarks.bin"
@@ -75,6 +90,9 @@ extern "C"
 #define ARF_ID_INVERSE_BIND       "inverse_bind_matrices"
 #define ARF_ID_FACE_DELTAS        "face_blendshape_deltas"
 #define ARF_ID_LANDMARK_VERTICES  "landmark_vertices"
+#define ARF_ID_TEXTURE_MATERIAL   "texture_material"
+/* sprintf(name, ARF_ID_TEXTURE_TARGET_FORMAT, targetIndex) */
+#define ARF_ID_TEXTURE_TARGET_FORMAT "texture_target_%u"
 
 /* data[].id for each data item -- what component fields (Skeleton.
  * inverseBindMatrix, Skin.weights, Mesh.data[], BlendshapeSet.shapes[],
@@ -85,6 +103,11 @@ extern "C"
 #define ARF_DATA_ID_INVERSE_BIND    3
 #define ARF_DATA_ID_FACE_DELTAS     4
 #define ARF_DATA_ID_LANDMARK_VERTICES 5
+/* Texture material is id 6, targets are 7, 8, ... -- the first variable-
+ * count data item this format writes; every other one above is fixed at
+ * exactly one instance. */
+#define ARF_DATA_ID_TEXTURE_MATERIAL 6
+#define ARF_DATA_ID_TEXTURE_TARGET_FIRST 7
 
 #define ARF_MIME_DENSE            "application/mpeg.arf.dense"
 #define ARF_MIME_SPARSE           "application/mpeg.arf.sparse"
@@ -215,6 +238,31 @@ extern "C"
 #define ARF_AAU_LANDMARK    3
 
 #define ARF_AAU_HEADER_BYTES 5  /* packed (type<<1)|reserved byte + uint32BE unitLength */
+
+/* ---------------------------------------------------------------------------
+ *  TextureSet / TextureTarget
+ * ---------------------------------------------------------------------------
+ *  components.textureSets[0] { name, id, animationInfo, material,
+ *  materialPath, targets: [ { name, id, texture, texturePath } ] }.
+ *
+ *  animationInfo is mandatory in the spec but there is nothing parametric to
+ *  link it to here (no AnimationLink enum value means "texture"), so this
+ *  library emits an empty array -- present, honestly empty, rather than a
+ *  fabricated link.
+ *
+ *  material/texture reference data items whose content is a whole opaque
+ *  image; materialPath/texturePath ("indicates where the texture can be
+ *  found in the item") exist for formats where one data item embeds several
+ *  textures (e.g. a GLB material). Since every data item here is a single
+ *  flat image with nothing to locate within it, both are emitted as "" --
+ *  this project's own convention for that case, undocumented by the spec
+ *  text available here, the same kind of choice as Mesh.data's slot order.
+ *
+ *  TextureSet has no baseMesh/mesh field of its own; skins[0].textureSet is
+ *  the only link tying it to anything, so this library emits it (unlike
+ *  Skin.blendshapeSet/landmarkSet, which are skipped as redundant with
+ *  BlendshapeSet/LandmarkSet's own baseMesh).
+ * -------------------------------------------------------------------------*/
 
 #ifdef __cplusplus
 }

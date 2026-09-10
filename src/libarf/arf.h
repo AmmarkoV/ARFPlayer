@@ -134,6 +134,33 @@ struct arfLandmarks
     unsigned int *vertexIndex;   /**< numberOfLandmarks, into mesh.positions */
 };
 
+/** @brief One texture target (components.textureSets[].targets[]) -- an
+ *  opaque image blob this library carries but never decodes.  There is no
+ *  AAU unit for texture blend weights (unlike BlendshapeSet/LandmarkSet,
+ *  TextureSet has no counterpart in the Animation Stream Format clause), so
+ *  this is a static asset reference, not an animated track. */
+struct arfTextureTarget
+{
+    char    name[ARF_MAX_NAME];
+    char    mimeType[ARF_MAX_NAME];  /**< e.g. "image/png"; this library never inspects it */
+    void   *bytes;
+    size_t  length;
+};
+
+/** @brief A texture set: a base material image plus a list of texture
+ *  targets to blend into it (components.textureSets).  Present only in
+ *  containers written with a texture set attached. */
+struct arfTextureSet
+{
+    char    name[ARF_MAX_NAME];
+    char    materialMimeType[ARF_MAX_NAME];
+    void   *materialBytes;
+    size_t  materialLength;
+
+    unsigned int             numberOfTargets;
+    struct arfTextureTarget *targets;
+};
+
 /** @brief A complete avatar container held in memory.
  *
  *  Animation is stored decoded and dense: every frame carries a local matrix
@@ -175,6 +202,10 @@ struct arfAvatar
     unsigned int          numberOfLandmarkFrames;
     unsigned int         *landmarkTimestamp;
     float                *landmarkPositions;  /**< numberOfLandmarkFrames * numberOfLandmarks * 3 */
+
+    /* Texture set -- components.textureSets, optional, static (no AAU track) */
+    unsigned int          hasTextureSet;
+    struct arfTextureSet  textureSet;
 
     /* Reserved capacity, used while building a container for writing */
     unsigned int frameCapacity;
@@ -366,6 +397,19 @@ int arfEnableLandmarks(struct arfAvatar *avatar, unsigned int numberOfLandmarks,
 /** @brief Append one landmark animation frame.
  *  @param positions numberOfLandmarks * 3 floats (x,y,z; z=0 for a 2D tracker) */
 int arfAppendLandmarkFrame(struct arfAvatar *avatar, unsigned int timestamp, const float *positions);
+
+/** @brief Attach a texture set, enabling it.  Call once; arfAddTextureTarget()
+ *  appends its targets afterwards.  Bytes are copied and carried opaquely --
+ *  this library never decodes them.
+ *  @param materialBytes the base material/texture image, copied
+ *  @param materialMimeType e.g. "image/png" */
+int arfEnableTextureSet(struct arfAvatar *avatar, const char *name,
+                        const void *materialBytes, size_t materialLength, const char *materialMimeType);
+
+/** @brief Append one texture target to the texture set enabled by
+ *  arfEnableTextureSet().  Bytes are copied and carried opaquely. */
+int arfAddTextureTarget(struct arfAvatar *avatar, const char *name,
+                        const void *bytes, size_t length, const char *mimeType);
 
 /** @brief Serialise an avatar to a .arfz container.
  *  @retval ARF_OK on success */

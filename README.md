@@ -23,11 +23,11 @@ and C++ bindings that wrap the same C API without copying anything.
 ## ⚠ Not yet a fully conformant ARF implementation
 
 `arf.json`'s component graph — numeric ids resolved by matching value, not
-array position; `structure` as Asset/LOD; `LandmarkSet` — and the AAU
-animation-stream bitstream (field widths, big-endian byte order,
-`AAU_LANDMARK`) have been checked against the FDIS-stage text of
-ISO/IEC 23090-39 and match it. Still this project's own convention rather
-than verified spec values:
+array position; `structure` as Asset/LOD; `LandmarkSet`;
+`TextureSet`/`TextureTarget` — and the AAU animation-stream bitstream (field
+widths, big-endian byte order, `AAU_LANDMARK`) have been checked against the
+FDIS-stage text of ISO/IEC 23090-39 and match it. Still this project's own
+convention rather than verified spec values:
 
 * the sparse skin-weight tensor (the spec only defines a dense one),
 * raw dense tensors in place of embedded GLB blendshape targets.
@@ -369,7 +369,7 @@ samples/           summerlove_0.arfz, the committed container every example uses
 
 The writer emits none of these, so there is nothing to read: ISOBMFF
 containers, RTP streaming, `MPEG_node_avatar` glTF scene integration,
-protection/DRM, texture sets, LoDs, `AnimationLink` conversion.
+protection/DRM, LoDs, `AnimationLink` conversion.
 
 ## See also
 

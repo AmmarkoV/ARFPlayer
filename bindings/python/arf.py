@@ -111,6 +111,26 @@ class _Landmarks(ctypes.Structure):
     ]
 
 
+class _TextureTarget(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char * MAX_NAME),
+        ("mimeType", ctypes.c_char * MAX_NAME),
+        ("bytes", ctypes.c_void_p),
+        ("length", ctypes.c_size_t),
+    ]
+
+
+class _TextureSet(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char * MAX_NAME),
+        ("materialMimeType", ctypes.c_char * MAX_NAME),
+        ("materialBytes", ctypes.c_void_p),
+        ("materialLength", ctypes.c_size_t),
+        ("numberOfTargets", ctypes.c_uint),
+        ("targets", ctypes.POINTER(_TextureTarget)),
+    ]
+
+
 class _Avatar(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * MAX_NAME),
@@ -136,6 +156,8 @@ class _Avatar(ctypes.Structure):
         ("numberOfLandmarkFrames", ctypes.c_uint),
         ("landmarkTimestamp", ctypes.POINTER(ctypes.c_uint)),
         ("landmarkPositions", ctypes.POINTER(ctypes.c_float)),
+        ("hasTextureSet", ctypes.c_uint),
+        ("textureSet", _TextureSet),
         ("frameCapacity", ctypes.c_uint),
         ("faceFrameCapacity", ctypes.c_uint),
         ("landmarkFrameCapacity", ctypes.c_uint),
@@ -217,6 +239,8 @@ def _bind(library: ctypes.CDLL) -> ctypes.CDLL:
         "arfAppendFaceFrame": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
         "arfEnableLandmarks": ([avatar_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)], ctypes.c_int),
         "arfAppendLandmarkFrame": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
+        "arfEnableTextureSet": ([avatar_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p], ctypes.c_int),
+        "arfAddTextureTarget": ([avatar_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p], ctypes.c_int),
         "arfSave": ([avatar_p, ctypes.c_char_p], ctypes.c_int),
         "arfExportOBJ": ([avatar_p, float_p, ctypes.c_char_p], ctypes.c_int),
     }
@@ -570,6 +594,22 @@ class Avatar:
         """Append one landmark frame: landmarks x 3 floats (x,y,z; z=0 for 2D)."""
         _check(library.arfAppendLandmarkFrame(self._handle, timestamp, _as_float_pointer(positions)),
                "appending a landmark frame")
+
+    def enable_texture_set(self, name: str, material_bytes: bytes, material_mime_type: str) -> None:
+        """Attach a texture set: an opaque base material image, carried but
+        never decoded (there is no per-frame track -- TextureSet has no AAU
+        counterpart)."""
+        _check(library.arfEnableTextureSet(self._handle, name.encode("utf-8"),
+                                            material_bytes, len(material_bytes),
+                                            material_mime_type.encode("utf-8")),
+               "enabling the texture set")
+
+    def add_texture_target(self, name: str, image_bytes: bytes, mime_type: str) -> None:
+        """Append one texture target: another opaque image blend target."""
+        _check(library.arfAddTextureTarget(self._handle, name.encode("utf-8"),
+                                            image_bytes, len(image_bytes),
+                                            mime_type.encode("utf-8")),
+               "adding a texture target")
 
     def save(self, path) -> None:
         """Write this avatar out as a .arfz container."""
