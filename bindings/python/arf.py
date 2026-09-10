@@ -104,6 +104,13 @@ class _Blendshapes(ctypes.Structure):
     ]
 
 
+class _Landmarks(ctypes.Structure):
+    _fields_ = [
+        ("numberOfLandmarks", ctypes.c_uint),
+        ("vertexIndex", ctypes.POINTER(ctypes.c_uint)),
+    ]
+
+
 class _Avatar(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * MAX_NAME),
@@ -123,8 +130,15 @@ class _Avatar(ctypes.Structure):
         ("numberOfFaceFrames", ctypes.c_uint),
         ("faceTimestamp", ctypes.POINTER(ctypes.c_uint)),
         ("blendshapeWeights", ctypes.POINTER(ctypes.c_float)),
+        ("hasLandmarks", ctypes.c_uint),
+        ("landmarks", _Landmarks),
+        ("landmarkTimescale", ctypes.c_float),
+        ("numberOfLandmarkFrames", ctypes.c_uint),
+        ("landmarkTimestamp", ctypes.POINTER(ctypes.c_uint)),
+        ("landmarkPositions", ctypes.POINTER(ctypes.c_float)),
         ("frameCapacity", ctypes.c_uint),
         ("faceFrameCapacity", ctypes.c_uint),
+        ("landmarkFrameCapacity", ctypes.c_uint),
     ]
 
 
@@ -201,6 +215,8 @@ def _bind(library: ctypes.CDLL) -> ctypes.CDLL:
         "arfAppendFrame": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
         "arfEnableFace": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
         "arfAppendFaceFrame": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
+        "arfEnableLandmarks": ([avatar_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)], ctypes.c_int),
+        "arfAppendLandmarkFrame": ([avatar_p, ctypes.c_uint, float_p], ctypes.c_int),
         "arfSave": ([avatar_p, ctypes.c_char_p], ctypes.c_int),
         "arfExportOBJ": ([avatar_p, float_p, ctypes.c_char_p], ctypes.c_int),
     }
@@ -544,6 +560,17 @@ class Avatar:
         _check(library.arfAppendFaceFrame(self._handle, timestamp, _as_float_pointer(weights)),
                "appending a face frame")
 
+    def enable_landmarks(self, vertex_index) -> None:
+        """Attach a landmark set: one mesh-vertex index per landmark."""
+        indices = list(vertex_index)
+        _check(library.arfEnableLandmarks(self._handle, len(indices), _as_uint_pointer(indices)),
+               "enabling the landmark track")
+
+    def append_landmark_frame(self, timestamp: int, positions) -> None:
+        """Append one landmark frame: landmarks x 3 floats (x,y,z; z=0 for 2D)."""
+        _check(library.arfAppendLandmarkFrame(self._handle, timestamp, _as_float_pointer(positions)),
+               "appending a landmark frame")
+
     def save(self, path) -> None:
         """Write this avatar out as a .arfz container."""
         _check(library.arfSave(self._handle, os.fsencode(path)), f"writing {path}")
@@ -587,6 +614,22 @@ def _as_float_pointer(values):
 
     flat = list(values)
     return (ctypes.c_float * len(flat))(*flat)
+
+
+def _as_uint_pointer(values):
+    """Accept a numpy array, a ctypes array or any integer sequence."""
+    if values is None:
+        return None
+
+    if _numpy is not None and isinstance(values, _numpy.ndarray):
+        contiguous = _numpy.ascontiguousarray(values, dtype=_numpy.uint32)
+        return contiguous.ctypes.data_as(ctypes.POINTER(ctypes.c_uint))
+
+    if isinstance(values, ctypes.Array):
+        return ctypes.cast(values, ctypes.POINTER(ctypes.c_uint))
+
+    flat = list(values)
+    return (ctypes.c_uint * len(flat))(*flat)
 
 
 def _main(argv) -> int:

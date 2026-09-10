@@ -779,6 +779,57 @@ static int arfLoadBlendshapes(struct arfAvatar *avatar, zip_t *archive,
     return 1;
 }
 
+/** @brief Load the optional set of tracked mesh-vertex landmarks.
+ *  LandmarkSet.vertices is a dense [n] uint32 tensor of mesh vertex indices. */
+static int arfLoadLandmarks(struct arfAvatar *avatar, zip_t *archive,
+                            const struct arfJsonValue *set, const struct arfJsonValue *dataArray)
+{
+    int verticesId = (int) arfJsonNumber(arfJsonMember(set,"vertices"),-1.0);
+    const char *verticesURI = arfResolveDataURI(dataArray,verticesId);
+    if (verticesURI==0) { arfSetError("landmarkSet.vertices (data id %d) does not resolve to a data item",verticesId); return 0; }
+
+    size_t size  = 0;
+    void  *bytes = arfExtractEntry(archive,verticesURI,&size);
+    if (bytes==0) { return 0; }
+
+    struct arfCursor      cursor;
+    struct arfDenseTensor tensor;
+    arfCursorInit(&cursor,bytes,size);
+
+    if (!arfReadDenseHeader(&cursor,&tensor,"landmark vertices")) { free(bytes); return 0; }
+
+    if ( (tensor.numberOfDimensions!=1) || (tensor.dtype!=ARF_COMPONENT_UNSIGNED_INT) )
+    {
+        arfSetError("landmark vertices must be an unsigned int [n] tensor");
+        free(bytes);
+        return 0;
+    }
+
+    avatar->landmarks.numberOfLandmarks = (unsigned int) tensor.dims[0];
+    avatar->landmarks.vertexIndex = (unsigned int *) malloc(arfDenseElementCount(&tensor) * sizeof(unsigned int));
+
+    if ( (avatar->landmarks.vertexIndex==0) ||
+         (!arfCursorReadU32s(&cursor,avatar->landmarks.vertexIndex,arfDenseElementCount(&tensor))) )
+    {
+        arfSetError("landmark vertices payload is truncated");
+        free(bytes);
+        return 0;
+    }
+    free(bytes);
+
+    for (unsigned int i=0; i<avatar->landmarks.numberOfLandmarks; i++)
+    {
+        if (avatar->landmarks.vertexIndex[i] >= avatar->mesh.numberOfVertices)
+        {
+            arfSetError("landmark %u addresses vertex %u of %u",
+                        i,avatar->landmarks.vertexIndex[i],avatar->mesh.numberOfVertices);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 
 /* ===========================================================================
  *  Animation streams
@@ -1002,6 +1053,101 @@ static int arfLoadFaceStream(struct arfAvatar *avatar, const void *bytes, size_t
     return 1;
 }
 
+/** @brief Decode animations/landmarks.bin into the avatar's landmark position
+ *  arrays.  Positions are always stored as 3 floats; a frame that arrives as
+ *  2D (is3DFlag off) is stored with z=0, so the in-memory shape stays uniform.
+ *  @param landmarkSetId the declared id of components.landmarkSets[0],
+ *  checked against each frame's ala_landmark_set_id. */
+static int arfLoadLandmarkStream(struct arfAvatar *avatar, const void *bytes, size_t size, int landmarkSetId)
+{
+    struct arfCursor cursor;
+    char profile[ARF_MAX_NAME];
+
+    arfCursorInit(&cursor,bytes,size);
+    if (!arfReadStreamConfig(&cursor,profile,&avatar->landmarkTimescale,"the landmark animation stream")) { return 0; }
+
+    struct arfCursor  counting = cursor;
+    struct arfAAUUnit unit;
+    unsigned int      frameCount = 0;
+
+    while (arfAAUNext(&counting,&unit))
+    {
+        if (unit.type == ARF_AAU_LANDMARK) { frameCount++; }
+    }
+
+    if (counting.failed) { arfSetError("the landmark animation stream is truncated"); return 0; }
+    if (frameCount==0)   { arfSetError("the landmark animation stream has no AAU_LANDMARK frames"); return 0; }
+
+    unsigned int landmarks = avatar->landmarks.numberOfLandmarks;
+
+    avatar->landmarkTimestamp = (unsigned int *) malloc((size_t) frameCount * sizeof(unsigned int));
+    avatar->landmarkPositions = (float *)        calloc((size_t) frameCount * landmarks * 3,sizeof(float));
+
+    if ( (avatar->landmarkTimestamp==0) || (avatar->landmarkPositions==0) )
+    {
+        arfSetError("out of memory allocating %u landmark frames",frameCount);
+        return 0;
+    }
+
+    avatar->numberOfLandmarkFrames = frameCount;
+    avatar->landmarkFrameCapacity  = frameCount;
+
+    unsigned int frame = 0;
+    while (arfAAUNext(&cursor,&unit))
+    {
+        if (unit.type != ARF_AAU_LANDMARK) { continue; }
+
+        struct arfCursor payload;
+        arfCursorInit(&payload,unit.payload,unit.length);
+
+        avatar->landmarkTimestamp[frame] = arfCursorReadU32BE(&payload);
+
+        int frameSetId = (int) arfCursorReadU16BE(&payload);
+        if (frameSetId != landmarkSetId)
+        {
+            arfSetError("landmark frame %u targets landmark set %d but the landmark set is %d",
+                        frame,frameSetId,landmarkSetId);
+            return 0;
+        }
+
+        unsigned int flags             = arfCursorReadU8(&payload);
+        int          velocityPresent   = (flags >> 7) & 1;
+        int          confidencePresent = (flags >> 6) & 1;
+        int          is3D              = (flags >> 5) & 1;
+        unsigned int entries           = arfCursorReadU16BE(&payload) + 1;
+
+        float *positions = avatar->landmarkPositions + (size_t) frame * landmarks * 3;
+        for (unsigned int e=0; e<entries; e++)
+        {
+            unsigned int index = arfCursorReadU16BE(&payload);
+            float        xyz[3] = {0.0f,0.0f,0.0f};
+
+            if (!arfCursorReadFloatsBE(&payload,xyz,is3D ? 3 : 2)) { break; }
+
+            if (velocityPresent)
+            {
+                /* Nothing in this library consumes landmark velocity yet;
+                 * read and discard it rather than storing it unused. */
+                arfCursorReadF32BE(&payload);
+                if (payload.failed) { break; }
+            }
+            if (confidencePresent)
+            {
+                arfCursorReadF32BE(&payload);
+                if (payload.failed) { break; }
+            }
+
+            if (index < landmarks) { memcpy(positions + (size_t) index*3,xyz,3*sizeof(float)); }
+        }
+
+        if (payload.failed) { arfSetError("landmark frame %u is truncated",frame); return 0; }
+
+        frame++;
+    }
+
+    return 1;
+}
+
 /* ===========================================================================
  *  Entry points
  * =========================================================================*/
@@ -1158,6 +1304,31 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
         avatar->hasFace = 1;
     }
 
+    /* Landmark animation, if this container carries one. */
+    const struct arfJsonValue *landmarkSet = arfJsonAt(arfJsonMember(components,"landmarkSets"),0);
+
+    if (landmarkSet!=0)
+    {
+        int landmarkSetId = (int) arfJsonNumber(arfJsonMember(landmarkSet,"id"),-4.0);
+        int landmarkBaseMesh = (int) arfJsonNumber(arfJsonMember(landmarkSet,"baseMesh"),-1.0);
+        if (landmarkBaseMesh != meshDeclaredId)
+        {
+            arfSetError("landmarkSets[0].baseMesh is %d, expected %d (meshes[0].id)",landmarkBaseMesh,meshDeclaredId);
+            goto failed;
+        }
+
+        if (!arfLoadLandmarks(avatar,archive,landmarkSet,dataArray)) { goto failed; }
+
+        streamBytes = arfExtractEntry(archive,ARF_ENTRY_LANDMARK_STREAM,&streamSize);
+        if (streamBytes==0) { goto failed; }
+
+        if (!arfLoadLandmarkStream(avatar,streamBytes,streamSize,landmarkSetId)) { goto failed; }
+        free(streamBytes);
+        streamBytes = 0;
+
+        avatar->hasLandmarks = 1;
+    }
+
     if (arfRebuildSkinIndex(avatar)!=ARF_OK) { goto failed; }
 
     arfJsonFree(document);
@@ -1221,6 +1392,9 @@ void arfFree(struct arfAvatar *avatar)
     free(avatar->localMatrices);
     free(avatar->faceTimestamp);
     free(avatar->blendshapeWeights);
+    free(avatar->landmarks.vertexIndex);
+    free(avatar->landmarkTimestamp);
+    free(avatar->landmarkPositions);
     free(avatar);
 }
 
@@ -1317,5 +1491,15 @@ void arfPrintInfo(const struct arfAvatar *avatar)
     else
     {
         printf("face track    : absent\n");
+    }
+
+    if (avatar->hasLandmarks)
+    {
+        printf("landmark track: %u landmarks, %u frames at %.3f ticks/s\n",
+               avatar->landmarks.numberOfLandmarks,avatar->numberOfLandmarkFrames,avatar->landmarkTimescale);
+    }
+    else
+    {
+        printf("landmark track: absent\n");
     }
 }

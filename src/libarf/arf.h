@@ -126,6 +126,14 @@ struct arfBlendshapes
     float        *deltas;    /**< numberOfShapes * numberOfVertices * 3 */
 };
 
+/** @brief A set of tracked mesh-vertex landmarks (components.landmarkSets).
+ *  Present only in containers written with landmark tracking enabled. */
+struct arfLandmarks
+{
+    unsigned int  numberOfLandmarks;
+    unsigned int *vertexIndex;   /**< numberOfLandmarks, into mesh.positions */
+};
+
 /** @brief A complete avatar container held in memory.
  *
  *  Animation is stored decoded and dense: every frame carries a local matrix
@@ -158,9 +166,20 @@ struct arfAvatar
     unsigned int         *faceTimestamp;
     float                *blendshapeWeights;  /**< numberOfFaceFrames * numberOfShapes */
 
+    /* Landmark track -- AAU_LANDMARK units of animations/landmarks.bin,
+     * optional.  Positions are always stored as 3 floats per landmark, z=0
+     * for a frame that arrived as 2D (ala_is_3d_flag off). */
+    unsigned int         hasLandmarks;
+    struct arfLandmarks   landmarks;
+    float                 landmarkTimescale;
+    unsigned int          numberOfLandmarkFrames;
+    unsigned int         *landmarkTimestamp;
+    float                *landmarkPositions;  /**< numberOfLandmarkFrames * numberOfLandmarks * 3 */
+
     /* Reserved capacity, used while building a container for writing */
     unsigned int frameCapacity;
     unsigned int faceFrameCapacity;
+    unsigned int landmarkFrameCapacity;
 };
 
 /** @brief Scratch buffers for one evaluated frame.  Allocate once, reuse. */
@@ -339,6 +358,14 @@ int arfEnableFace(struct arfAvatar *avatar, unsigned int numberOfShapes, const f
 /** @brief Append one face animation frame.
  *  @param weights numberOfShapes weights */
 int arfAppendFaceFrame(struct arfAvatar *avatar, unsigned int timestamp, const float *weights);
+
+/** @brief Attach a landmark set, enabling the landmark track.
+ *  @param vertexIndex numberOfLandmarks mesh-vertex indices, copied */
+int arfEnableLandmarks(struct arfAvatar *avatar, unsigned int numberOfLandmarks, const unsigned int *vertexIndex);
+
+/** @brief Append one landmark animation frame.
+ *  @param positions numberOfLandmarks * 3 floats (x,y,z; z=0 for a 2D tracker) */
+int arfAppendLandmarkFrame(struct arfAvatar *avatar, unsigned int timestamp, const float *positions);
 
 /** @brief Serialise an avatar to a .arfz container.
  *  @retval ARF_OK on success */

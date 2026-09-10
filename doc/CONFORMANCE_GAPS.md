@@ -19,12 +19,16 @@ to change to produce containers this project can read conformantly — see
 [For SAM3DBody-cpp](#for-sam3dbody-cpp) at the end. It follows the same
 "upstream issue" spirit as [`doc/UPSTREAM_ISSUE.md`](UPSTREAM_ISSUE.md).
 
-**Status: Milestone 1 (numeric-id component graph) and Milestone 2 (AAU
-bitstream) are implemented.** `structure` as Asset/LOD and the `id_map.txt`
-sidecar are done; `samples/summerlove_0.arfz` has been regenerated twice (once
-per milestone) in the new shapes -- both were clean cutovers, the reader no
-longer accepts the pre-rewrite shapes at all. Sections below are marked
-`[done]` or `[pending]` accordingly. Still pending: `LandmarkSet`,
+**Status: Milestone 1 (numeric-id component graph), Milestone 2 (AAU
+bitstream) and Milestone 3 (`LandmarkSet`/`AAU_LANDMARK`) are implemented.**
+`structure` as Asset/LOD and the `id_map.txt` sidecar are done;
+`samples/summerlove_0.arfz` has been regenerated across the milestones that
+changed its shape -- all clean cutovers, the reader no longer accepts a
+pre-rewrite shape at all. `LandmarkSet` has no real tracking data source in
+this codebase, so it was verified with a synthetic round trip through the
+Python bindings (`enable_landmarks()`/`append_landmark_frame()`) rather than
+against a real sample -- see that section for details. Sections below are
+marked `[done]` or `[pending]` accordingly. Still pending:
 `TextureSet`/`TextureTarget`, `BlendshapeSet` shapes as GLB. The skin-weight
 tensor stays sparse for now, a deliberate choice, not an oversight — see
 that section.
@@ -51,16 +55,16 @@ choice), not document-level `id` references.
 
 **In scope** (the parts worth conforming to):
 
-* the numeric-id component graph (`Node`/`Skeleton`/`Skin`/`Mesh`/
+* `[done]` the numeric-id component graph (`Node`/`Skeleton`/`Skin`/`Mesh`/
   `BlendshapeSet`) that everything else sits on top of
-* the `structure` Asset/LOD model
-* the AAU bitstream (field widths, `AAU_LANDMARK`)
-* `LandmarkSet`
-* `BlendshapeSet` shapes as bare-geometry GLB instead of raw delta tensors
-* `TextureSet`/`TextureTarget` (parametric texture blending), declaration-only
-  `AnimationLink` (no cross-framework retargeting runtime)
-* a non-normative `id_map.txt` sidecar for debugging (new idea, not in the
-  spec — see [below](#id_maptxt-sidecar-done))
+* `[done]` the `structure` Asset/LOD model
+* `[done]` the AAU bitstream (field widths, `AAU_LANDMARK`)
+* `[done]` `LandmarkSet`
+* `[pending]` `BlendshapeSet` shapes as bare-geometry GLB instead of raw delta tensors
+* `[pending]` `TextureSet`/`TextureTarget` (parametric texture blending),
+  declaration-only `AnimationLink` (no cross-framework retargeting runtime)
+* `[done]` a non-normative `id_map.txt` sidecar for debugging (new idea, not
+  in the spec — see [below](#id_maptxt-sidecar-done))
 
 **Out of scope**, by explicit choice, revisit only if a real need shows up:
 
@@ -170,12 +174,41 @@ together, per spec, rather than a thin name-matching shim:
 | `shapes` | **still pending.** Today: `shapes` is a one-element array naming a single data item that holds one dense tensor of raw per-vertex position deltas, `[n_shapes, n_verts, 3]` float32. **Spec**: an array of numeric data-item references, each pointing at its own GLB file containing *only* geometry (vertices + faces, no materials/textures) for that one shape. This is a bigger change than a field rename — it means encoding/decoding minimal GLB (JSON chunk + BIN chunk, accessors, bufferViews), one file per blendshape target, and building the delta against the base mesh rather than storing a pre-computed delta blob. |
 | `animationInfo` | not added, optional, skipped under scope decision |
 
-## `LandmarkSet` — entirely new
+## `LandmarkSet` `[done]`
 
-Not implemented at all today. Needs: `name`, `id`, `baseMesh` (a mesh
-reference), `vertices` (a data-item reference to the list of vertex indices
-making up the landmark set), optional `animationInfo`. Paired with the new
-`AAU_LANDMARK` unit type below.
+Implemented: `struct arfLandmarks` in `arf.h` (`numberOfLandmarks` +
+`vertexIndex`, mesh-vertex indices), `components.landmarkSets[0]` with
+`name`/`id`/`baseMesh`/`vertices` (a dense `[n]` uint32 tensor, cross-checked
+against the mesh vertex count on load), and the write API
+`arfEnableLandmarks()`/`arfAppendLandmarkFrame()` mirroring
+`arfEnableFace()`/`arfAppendFaceFrame()`. `animationInfo` not added, optional,
+skipped under the same scope decision as elsewhere.
+
+No producer in this codebase tracks real landmark data, so this was verified
+with a synthetic avatar built through the Python bindings: `enable_landmarks`
++ `append_landmark_frame`, saved, reloaded, and diffed field-for-field
+(vertex indices, per-frame xyz positions) against what was written — plus a
+combined face+landmark container to exercise the `data[]`/`components`
+`isLast`/ordering logic when every optional track is present at once.
+`web/arf.js` is unaffected by design: it only ever opens `animations/
+joints.bin`, the same way it already never opens `animations/face.bin`, so
+it has no landmark-shaped hole to fall into.
+
+## AAU_LANDMARK `[done]`
+
+Implemented per Table 42: `ala_landmark_set_id` (16-bit, checked against
+`landmarkSets[0].id`), a one-byte `velocity_present`/`confidence_present`/
+`is_3d_flag`/reserved flag field, `landmark_count_minus1`, then per-entry
+`landmark_index` + 2 or 3 coordinate floats + optional velocity/confidence
+(parsed and discarded, same as `AAU_JOINT`/`AAU_BLENDSHAPE`). Landmarks are
+always stored internally as 3 floats (z=0 for a 2D frame) so the in-memory
+shape stays uniform regardless of what a source stream sends; the writer
+always emits `is_3d_flag=1` since that's the only shape it has to give.
+Lives in its own `animations/landmarks.bin`, the same one-stream-per-modality
+pattern as `joints.bin`/`face.bin`, with its own profile string,
+`"arf-landmark-v1"` — a name this project introduces, following the `arf-
+body-v1`/`arf-face-v1` pattern, since there was no established one to
+inherit here.
 
 ## `TextureSet` / `TextureTarget` — entirely new
 
@@ -315,15 +348,19 @@ pre-rewrite shape at all), so `ARFWriter` needs, concretely:
   **big-endian**, the field widths and count-minus-1 convention, the new
   `aja_joint_set_id`/`afa_blendshape_set_id` fields (write the same id as the
   corresponding `skeletons[0].id`/`blendshapeSets[0].id`), and the 8-bit
-  profile-string length — see [AAU bitstream](#aau-bitstream-done-except-aau_landmark)
-  for the exact byte layout
+  profile-string length — see [AAU bitstream](#aau-bitstream-done) for the
+  exact byte layout
+* if landmark tracking is ever added, `components.landmarkSets` +
+  `AAU_LANDMARK` are both implemented and waiting on this side — `name`/
+  `id`/`baseMesh`/`vertices` (a dense uint32 tensor of mesh-vertex indices),
+  its own `animations/landmarks.bin` with profile `"arf-landmark-v1"`, and
+  the `ala_*` field layout in [AAU_LANDMARK](#aau_landmark-done)
 
 Still open, not yet needed for the two sides to agree on today's shape:
 
 * if blendshape/facial tracking export is ever extended, emit each shape as
   its own geometry-only GLB rather than one combined delta tensor — pending
   on `ARFPlayer`'s side too
-* `AAU_LANDMARK`/`LandmarkSet` — pending on `ARFPlayer`'s side too
 
 Recorded here so both sides can move in lockstep instead of `ARFPlayer`
 conforming to a spec that `ARFWriter` no longer produces containers matching.

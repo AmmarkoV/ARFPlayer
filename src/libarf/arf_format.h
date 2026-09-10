@@ -4,12 +4,13 @@
  *
  *  Conformance status, see doc/CONFORMANCE_GAPS.md for the full accounting:
  *  the JSON document's component graph (numeric ids/indices, `structure` as
- *  Asset/LOD) matches ISO/IEC 23090-39 as read from the FDIS-stage text.  The
- *  AAU bitstream (numeric type codes, field widths), the sparse skin-weight
- *  tensor (the spec only defines a dense one), and `BlendshapeSet.shapes`
- *  (raw deltas here, GLB targets in the spec) are still this project's own
- *  convention, inherited from the original SAM3DBody-flavoured design.  This
- *  is NOT yet a fully certified-conformant implementation.
+ *  Asset/LOD, `LandmarkSet`) and the AAU bitstream (field widths, big-endian
+ *  byte order, `AAU_LANDMARK`) match ISO/IEC 23090-39 as read from the
+ *  FDIS-stage text.  The sparse skin-weight tensor (the spec only defines a
+ *  dense one) and `BlendshapeSet.shapes` (raw deltas here, GLB targets in the
+ *  spec) are still this project's own convention, inherited from the
+ *  original SAM3DBody-flavoured design.  This is NOT yet a fully
+ *  certified-conformant implementation.
  *
  *  Everything this library assumes about the byte layout is stated here, so
  *  that when a container stops loading there is exactly one file to diff
@@ -39,8 +40,10 @@ extern "C"
  *    data/skin_weights.bin       sparse dims [n_verts, n_joints]
  *    data/inv_bind_pose.bin      dense  [n_joints, 16]         float32
  *    data/face_blendshapes.bin   dense  [n_shapes, n_verts, 3] float32  (optional)
+ *    data/landmark_vertices.bin  dense  [n_landmarks]          uint32   (optional)
  *    animations/joints.bin       AAU_CONFIG + one AAU_JOINT per frame
  *    animations/face.bin         AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
+ *    animations/landmarks.bin    AAU_CONFIG + one AAU_LANDMARK per frame (optional)
  *
  *  Every integer and float in the binary payloads is little-endian.
  *
@@ -59,8 +62,10 @@ extern "C"
 #define ARF_ENTRY_SKIN_WEIGHTS    "data/skin_weights.bin"
 #define ARF_ENTRY_INV_BIND_POSE   "data/inv_bind_pose.bin"
 #define ARF_ENTRY_FACE_DELTAS     "data/face_blendshapes.bin"
+#define ARF_ENTRY_LANDMARK_VERTICES "data/landmark_vertices.bin"
 #define ARF_ENTRY_JOINT_STREAM    "animations/joints.bin"
 #define ARF_ENTRY_FACE_STREAM     "animations/face.bin"
+#define ARF_ENTRY_LANDMARK_STREAM "animations/landmarks.bin"
 
 /* data[].name for each data item -- descriptive only, arf.json resolves
  * component -> data references by data[].id (below), not by this string. */
@@ -69,15 +74,17 @@ extern "C"
 #define ARF_ID_SKIN_WEIGHTS       "skin_weights"
 #define ARF_ID_INVERSE_BIND       "inverse_bind_matrices"
 #define ARF_ID_FACE_DELTAS        "face_blendshape_deltas"
+#define ARF_ID_LANDMARK_VERTICES  "landmark_vertices"
 
 /* data[].id for each data item -- what component fields (Skeleton.
- * inverseBindMatrix, Skin.weights, Mesh.data[], BlendshapeSet.shapes[])
- * actually reference. */
-#define ARF_DATA_ID_MESH_POSITIONS 0
-#define ARF_DATA_ID_MESH_INDICES   1
-#define ARF_DATA_ID_SKIN_WEIGHTS   2
-#define ARF_DATA_ID_INVERSE_BIND   3
-#define ARF_DATA_ID_FACE_DELTAS    4
+ * inverseBindMatrix, Skin.weights, Mesh.data[], BlendshapeSet.shapes[],
+ * LandmarkSet.vertices) actually reference. */
+#define ARF_DATA_ID_MESH_POSITIONS  0
+#define ARF_DATA_ID_MESH_INDICES    1
+#define ARF_DATA_ID_SKIN_WEIGHTS    2
+#define ARF_DATA_ID_INVERSE_BIND    3
+#define ARF_DATA_ID_FACE_DELTAS     4
+#define ARF_DATA_ID_LANDMARK_VERTICES 5
 
 #define ARF_MIME_DENSE            "application/mpeg.arf.dense"
 #define ARF_MIME_SPARSE           "application/mpeg.arf.sparse"
@@ -86,7 +93,12 @@ extern "C"
 #define ARF_CONTAINER_VERSION     "1.0"
 #define ARF_PROFILE_BODY          "arf-body-v1"
 #define ARF_PROFILE_FACE          "arf-face-v1"
+/* "arf-landmark-v1" has no established precedent to inherit -- unlike BODY/
+ * FACE, which came from the original SAM3DBody writer, this is a new name
+ * this project introduces, following the same pattern. */
+#define ARF_PROFILE_LANDMARK      "arf-landmark-v1"
 #define ARF_BLENDSHAPE_SET_ID     "face_expression"
+#define ARF_LANDMARK_SET_ID       "landmarks"
 
 /* ---------------------------------------------------------------------------
  *  id_map.txt (non-normative)
@@ -174,6 +186,17 @@ extern "C"
  *                      float32BE confidence if confidencePresent; }
  *                      * (blendshapeCountMinus1 + 1)
  *
+ *    AAU_LANDMARK    uint32BE timestampTicks
+ *                    uint16BE landmarkSetId         the landmark set's declared id
+ *                    uint1 velocityPresent, uint1 confidencePresent,
+ *                    uint1 is3DFlag, uint5 reserved   packed into one byte
+ *                    uint16BE landmarkCountMinus1
+ *                    { uint16BE landmarkIndex;
+ *                      float32BE coordinates[3] if is3DFlag else [2];
+ *                      float32BE velocity if velocityPresent;
+ *                      float32BE confidence if confidencePresent; }
+ *                      * (landmarkCountMinus1 + 1)
+ *
  *  The first unit of every stream is an AAU_CONFIG.  One tick is one frame --
  *  timestamps are integers on purpose, to avoid float drift -- so wall-clock
  *  time is  timestamp / timescale  seconds.
@@ -181,11 +204,9 @@ extern "C"
  *  This library never has velocity or confidence data to emit, so the writer
  *  always clears those presence bits; the reader still has to parse them
  *  correctly (and discard the optional fields) for a container that sets them.
- *
- *  Not implemented: AAU_LANDMARK (type 3) and the LandmarkSet component it
- *  depends on -- see doc/CONFORMANCE_GAPS.md. A landmark unit in an incoming
- *  stream is still skipped safely by the unitLength mechanism above, same as
- *  any other type this reader does not specifically handle.
+ *  The writer always sets is3DFlag (this library only ever stores 3
+ *  coordinates per landmark); the reader accepts either and stores a 2D
+ *  frame's landmarks with z=0, so the in-memory shape stays uniform.
  * -------------------------------------------------------------------------*/
 
 #define ARF_AAU_CONFIG      0

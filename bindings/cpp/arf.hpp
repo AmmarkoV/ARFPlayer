@@ -239,6 +239,7 @@ public:
     unsigned int frame_count()    const noexcept { return avatar_->numberOfFrames; }
     unsigned int root_node()      const noexcept { return avatar_->rootNode; }
     bool         has_face()       const noexcept { return avatar_->hasFace != 0; }
+    bool         has_landmarks()  const noexcept { return avatar_->hasLandmarks != 0; }
 
     /** @brief Ticks per second, which for these containers is frames per second. */
     float timescale() const noexcept { return avatar_->timescale; }
@@ -353,6 +354,16 @@ public:
     void append_face_frame(unsigned int timestamp, const float *weights)
     {
         detail::check(arfAppendFaceFrame(avatar_, timestamp, weights), "appending a face frame");
+    }
+
+    void enable_landmarks(unsigned int landmark_count, const unsigned int *vertex_index)
+    {
+        detail::check(arfEnableLandmarks(avatar_, landmark_count, vertex_index), "enabling the landmark track");
+    }
+
+    void append_landmark_frame(unsigned int timestamp, const float *positions)
+    {
+        detail::check(arfAppendLandmarkFrame(avatar_, timestamp, positions), "appending a landmark frame");
     }
 
     void save(const std::string &path) const

@@ -16,14 +16,15 @@ stops loading.
 ## Conformance status
 
 ARF is ISO/IEC 23090-39 (MPEG-I Part 39). `libarf`'s `arf.json` component
-graph — numeric ids/indices, `structure` as Asset/LOD — has been checked
-against the FDIS-stage text and matches it; see
+graph — numeric ids resolved by matching value, not array position;
+`structure` as Asset/LOD; `LandmarkSet` — and the AAU animation-stream
+bitstream (field widths, big-endian byte order, `AAU_LANDMARK`) have been
+checked against the FDIS-stage text and match it; see
 [`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting of
 what was changed and why. Still outstanding, and still this project's own
-convention rather than verified spec values: the AAU bitstream's numeric
-type codes and field widths, the sparse skin-weight tensor (the spec only
-defines a dense one), and `BlendshapeSet.shapes` as one combined raw delta
-tensor rather than per-shape embedded GLB targets.
+convention rather than verified spec values: the sparse skin-weight tensor
+(the spec only defines a dense one), and `BlendshapeSet.shapes` as one
+combined raw delta tensor rather than per-shape embedded GLB targets.
 
 This container format traces back to
 [SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)'s `ARFWriter`,
@@ -64,10 +65,12 @@ ISOBMFF/MPEG-2 Systems use, where it means big-endian — see
 │   ├── mesh_indices.bin        dense  [n_tris, 3]             uint32
 │   ├── skin_weights.bin        sparse dims [n_verts, n_joints]
 │   ├── inv_bind_pose.bin       dense  [n_joints, 16]          float32
-│   └── face_blendshapes.bin    dense  [n_shapes, n_verts, 3]  float32   (optional)
+│   ├── face_blendshapes.bin    dense  [n_shapes, n_verts, 3]  float32   (optional)
+│   └── landmark_vertices.bin   dense  [n_landmarks]           uint32   (optional)
 └── animations/
     ├── joints.bin              AAU_CONFIG + one AAU_JOINT per frame
-    └── face.bin                AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
+    ├── face.bin                AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
+    └── landmarks.bin           AAU_CONFIG + one AAU_LANDMARK per frame (optional)
 ```
 
 One container is one tracked person. For a pipeline-produced container the
@@ -80,28 +83,36 @@ take them from the file, never hardcode them.
 Five top-level keys, all mandatory: `preamble`, `metadata`, `structure`,
 `components`, `data`.
 
-Every component's numeric `id` is its index within its own
-`components.<array>` — `components.nodes[i].id == i`, and so on for
-skeletons, skins, meshes and blendshape sets. This library only ever holds
-one mesh/skin/skeleton/blendshape set, so those always get id `0`; `Node.id`
-matches AAU `jointIndex` values one for one. Every component still carries
-its own human-readable `name` string alongside its numeric `id`.
+Every component carries a numeric `id`, resolved by matching value against
+the target array's own declared ids -- **not** by array position (the
+General Conventions clause: "All references used in the ARF document are to
+the id field of the referred item. Index-based referencing is not used in
+this specification."). This library's own writer assigns sequential
+`id == index` for everything it writes -- since this library only ever holds
+one mesh/skin/skeleton/blendshape set/landmark set, those always get id `0`
+-- but a reader must not assume that of a container it did not write itself.
+`Skeleton.joints` values are also node ids, resolved the same way; AAU
+`jointIndex` values, by contrast, are positional into that resolved list
+(the field is named "index," not "id," and is a different kind of reference
+-- see "Avatar Animation Units" below). Every component still carries its
+own human-readable `name` string alongside its numeric `id`.
 
 ```
 preamble:  { signature: "ARF", version: "1.0",
-             supportedAnimations: ["arf-body-v1", ("arf-face-v1")] }
+             supportedAnimations: ["arf-body-v1", ("arf-face-v1"), ("arf-landmark-v1")] }
 
 metadata:  { name: <string>, id: <string> }
 
 structure.assets: [
   { name: "body", isMain: true,
-    lods: [ { name: "lod0", skins: [0], meshes: [0], skeletons: [0], (blendshapeSets: [0]) } ] }
+    lods: [ { name: "lod0", skins: [0], meshes: [0], skeletons: [0],
+              (blendshapeSets: [0]), (landmarkSets: [0]) } ] }
 ]
-// No field names the animation streams' location -- animations/joints.bin
-// and animations/face.bin are found by fixed path, see "Avatar Animation
-// Units" below.
+// No field names the animation streams' location -- animations/joints.bin,
+// animations/face.bin and animations/landmarks.bin are found by fixed path,
+// see "Avatar Animation Units" below.
 
-components.nodes: [ { id: 0, name: <joint name>, mapping: <semantic path>,
+components.nodes: [ { id: <number>, name: <joint name>, mapping: <semantic path>,
                       parent: <node id>,         // absent on the root only
                       translation: [x,y,z],       // rest, parent-relative, centimetres -- optional
                       rotation: [x,y,z,w],        // rest, XYZW -- optional
@@ -114,13 +125,16 @@ components.skeletons: [ { id: 0, name: "skeleton0", root: <root node id>,
                           inverseBindMatrix: <data id> } ]
 
 components.skins:     [ { id: 0, name: "skin0", mapping: <path>,
-                          skeleton: 0, mesh: 0, weights: <data id> } ]
+                          skeleton: <skeleton id>, mesh: <mesh id>, weights: <data id> } ]
 
 components.meshes:    [ { id: 0, name: "mesh0", path: <path>,
                           data: [<positions data id>, <indices data id>] } ]
 
-components.blendshapeSets: [ { id: 0, name: "face_expression", baseMesh: 0,
+components.blendshapeSets: [ { id: 0, name: "face_expression", baseMesh: <mesh id>,
                                shapes: [<data id>] } ]  // optional
+
+components.landmarkSets: [ { id: 0, name: "landmarks", baseMesh: <mesh id>,
+                             vertices: <data id> } ]  // optional
 
 data: [ { id: <number>, name: <string>, uri, type, byteLength } ]
 ```
@@ -145,14 +159,15 @@ error, which is why `libarf` verifies all of them at load time:
 
 * **`data[].byteLength` against the real entry size.** A mismatch means the
   JSON and the binaries came from different runs.
-* **Every component reference resolves**, and every `uri` exists in the ZIP.
-* **Every node's `id` equals its index**, and every reference to a node
-  (`parent`, `skeletons[0].root`, `skeletons[0].joints`) is a valid index.
-* **Exactly one node has no `parent`**, and it is the one `skeletons[0].root`
-  names.
-* **`skeletons[0].joints` is `[0, 1, 2, ...]`, the same order as
-  `components.nodes`.** AAU `jointIndex` values index this list positionally,
-  so if the two ever disagree every joint drives the wrong bone, silently.
+* **Every component reference resolves** by matching declared `id`, and
+  every `uri` exists in the ZIP. A reference is never treated as a direct
+  array index.
+* **Exactly one node has no `parent`**, and it resolves to the node
+  `skeletons[0].root` names.
+* **`skeletons[0].joints`, resolved to positions, is `[0, 1, 2, ...]`** in
+  `components.nodes` order. AAU `jointIndex` values index this list
+  positionally, so if the two ever disagree every joint drives the wrong
+  bone, silently.
 * **Every parent precedes its child** in the node list. The writer emits the
   hierarchy in that order; depending on it makes composition a single forward
   pass and rules out cycles for free.
@@ -196,7 +211,7 @@ container:
 
 ```
 uint7BE unit_type, uint1 reserved   packed into one byte: (unit_type<<1)|reserved
-                                     0 AAU_CONFIG, 1 AAU_BLENDSHAPE, 2 AAU_JOINT
+                                     0 AAU_CONFIG, 1 AAU_BLENDSHAPE, 2 AAU_JOINT, 3 AAU_LANDMARK
 uint32BE unit_length                payload bytes that follow
 byte[]   payload
 ```
@@ -207,8 +222,9 @@ type-specific fields:
 ```
 AAU_CONFIG      uint32BE timestamp (always 0)
                 uint8    profile_length
-                byte[profile_length] profile   "arf-body-v1" | "arf-face-v1",
-                                                a single length byte, no NUL
+                byte[profile_length] profile   "arf-body-v1" | "arf-face-v1" |
+                                                "arf-landmark-v1", a single
+                                                length byte, no NUL
                 float32BE timescale             ticks per second, i.e. fps
 
 AAU_JOINT       uint32BE timestamp_ticks       == frame index
@@ -226,6 +242,17 @@ AAU_BLENDSHAPE  uint32BE timestamp_ticks
                 { uint16BE blendshape_index; float32BE weight;
                   float32BE confidence if confidence_present }
                   * (blendshape_count_minus1 + 1)
+
+AAU_LANDMARK    uint32BE timestamp_ticks
+                uint16BE landmark_set_id        the landmark set's declared id
+                uint1 velocity_present, uint1 confidence_present,
+                uint1 is_3d_flag, uint5 reserved   packed into one byte
+                uint16BE landmark_count_minus1
+                { uint16BE landmark_index;
+                  float32BE coordinates[3] if is_3d_flag else [2];
+                  float32BE velocity if velocity_present;
+                  float32BE confidence if confidence_present }
+                  * (landmark_count_minus1 + 1)
 ```
 
 The first unit of every stream is an `AAU_CONFIG`. One tick is one frame —
@@ -234,16 +261,16 @@ time is `timestamp / timescale` seconds.
 
 This library never has velocity or confidence data to emit, so the writer
 always clears those presence bits; a reader still has to parse them correctly
-(and discard the optional fields) for a container that sets them.
+(and discard the optional fields) for a container that sets them. The writer
+always sets `is_3d_flag` (landmarks are stored as 3 floats internally
+regardless of source); the reader accepts either and stores a 2D frame's
+landmarks with z=0, so the in-memory shape stays uniform.
 
 **Unknown unit types must be skipped, not treated as an error.**
 `unit_length` exists precisely so a reader can step over units it does not
 understand. This is the format's only forward-compatibility hook, and a reader
 that rejects an unknown type will break the first time the writer gains a new
-one. `AAU_LANDMARK` (type 3) is one such type today — this library recognizes
-the code but has no `LandmarkSet` component to hang it off yet, so a landmark
-unit is skipped the same way any other unrecognized type is; see
-[doc/CONFORMANCE_GAPS.md](CONFORMANCE_GAPS.md).
+one.
 
 ## Conventions
 
@@ -325,16 +352,15 @@ that shows the glitch.
 ## `id_map.txt` (non-normative)
 
 A flat `<type>\t<id>\t<name>` line per component (`node`, `mesh`, `skin`,
-`skeleton`, `blendshapeSet`), so a raw `AAU_JOINT` stream's numeric joint
-indices can be matched to a name without a JSON parser. Every component
-already carries its own mandatory `name` in `arf.json` — this is purely a
-debugging convenience, never referenced from `data[]`/`structure`/
+`skeleton`, `blendshapeSet`, `landmarkSet`), so a raw `AAU_JOINT` stream's
+numeric joint indices can be matched to a name without a JSON parser. Every
+component already carries its own mandatory `name` in `arf.json` — this is
+purely a debugging convenience, never referenced from `data[]`/`structure`/
 `components`, and a conformant reader has no reason to open it.
 
 ## Not in the format as emitted
 
 The writer produces none of these, so a reader has nothing to handle: ISOBMFF
 containers, RTP payload streaming, `MPEG_node_avatar` glTF scene integration,
-authentication/biometrics, protection/DRM, landmark sets, texture sets and
-texture animation, LoDs, and `AnimationLink`/`mapping` framework-conversion
-objects.
+authentication/biometrics, protection/DRM, texture sets and texture
+animation, LoDs, and `AnimationLink`/`mapping` framework-conversion objects.
