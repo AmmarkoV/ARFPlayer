@@ -23,13 +23,15 @@ and C++ bindings that wrap the same C API without copying anything.
 ## ⚠ Not yet a fully conformant ARF implementation
 
 `arf.json`'s component graph — numeric ids/indices, `structure` as
-Asset/LOD — has been checked against the FDIS-stage text of ISO/IEC 23090-39
-and matches it. Still this project's own convention rather than verified
-spec values:
+Asset/LOD — and the AAU animation-stream bitstream (field widths, big-endian
+byte order) have been checked against the FDIS-stage text of ISO/IEC 23090-39
+and match it. Still this project's own convention rather than verified spec
+values:
 
-* the AAU bitstream's numeric type codes and field widths,
 * the sparse skin-weight tensor (the spec only defines a dense one),
-* raw dense tensors in place of embedded GLB blendshape targets.
+* raw dense tensors in place of embedded GLB blendshape targets,
+* `AAU_LANDMARK` and the `LandmarkSet` component it depends on, not
+  implemented (an incoming landmark unit is still skipped safely).
 
 Everything this library assumes about the bytes is written down in one place,
 [`src/libarf/arf_format.h`](src/libarf/arf_format.h), so there is a single file

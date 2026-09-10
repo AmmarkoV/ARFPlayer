@@ -85,11 +85,62 @@ static inline float arfCursorReadF32(struct arfCursor *cursor)
     return value;
 }
 
-/** @brief Read a length-prefixed UTF-8 string into a fixed buffer.
- *  @retval 1 on success, 0 if it overran the cursor or the destination */
-static inline int arfCursorReadString(struct arfCursor *cursor, char *destination, size_t destinationSize)
+/* ---------------------------------------------------------------------------
+ *  Big-endian primitives, for the AAU animation stream only.
+ * ---------------------------------------------------------------------------
+ *  Every other binary payload in this format (dense/sparse tensors) is
+ *  little-endian, per this project's own convention. The AAU bitstream
+ *  tables in the spec use "uimsbf" -- unsigned integer, most significant bit
+ *  first -- the same notation MPEG systems bitstreams (ISOBMFF, MPEG-2
+ *  Systems) use, where it means big-endian byte order. Named with an
+ *  explicit BE suffix throughout so the two conventions are never mixed up
+ *  at a call site by accident.
+ * -------------------------------------------------------------------------*/
+
+static inline unsigned int arfCursorReadU16BE(struct arfCursor *cursor)
 {
-    unsigned int length = arfCursorReadU32(cursor);
+    const unsigned char *at = arfCursorTake(cursor,2);
+    if (at==0) { return 0; }
+    return ((unsigned int) at[0] << 8) | (unsigned int) at[1];
+}
+
+static inline unsigned int arfCursorReadU32BE(struct arfCursor *cursor)
+{
+    const unsigned char *at = arfCursorTake(cursor,4);
+    if (at==0) { return 0; }
+    return ((unsigned int) at[0] << 24) | ((unsigned int) at[1] << 16) |
+          ((unsigned int) at[2] << 8)  |  (unsigned int) at[3];
+}
+
+static inline float arfCursorReadF32BE(struct arfCursor *cursor)
+{
+    unsigned int bits = arfCursorReadU32BE(cursor);
+    float value;
+    memcpy(&value,&bits,4);
+    return value;
+}
+
+static inline int arfCursorReadFloatsBE(struct arfCursor *cursor, float *destination, size_t count)
+{
+    const unsigned char *at = arfCursorTake(cursor,count*4);
+    if (at==0) { return 0; }
+
+    for (size_t i=0; i<count; i++)
+    {
+        unsigned int bits = ((unsigned int) at[i*4+0] << 24) | ((unsigned int) at[i*4+1] << 16) |
+                            ((unsigned int) at[i*4+2] << 8)  |  (unsigned int) at[i*4+3];
+        memcpy(&destination[i],&bits,4);
+    }
+    return 1;
+}
+
+/** @brief Read an 8-bit-length-prefixed UTF-8 string (acu_profile_length in
+ *  the spec, distinct from this format's other, 32-bit-length-prefixed
+ *  strings -- the AAU config unit is the only field that uses this form).
+ *  @retval 1 on success, 0 if it overran the cursor or the destination */
+static inline int arfCursorReadString8(struct arfCursor *cursor, char *destination, size_t destinationSize)
+{
+    unsigned int length = arfCursorReadU8(cursor);
     const unsigned char *at = arfCursorTake(cursor,length);
     if (at==0)                        { return 0; }
     if (length >= destinationSize)    { cursor->failed = 1; return 0; }
@@ -205,11 +256,46 @@ static inline void arfBufferWriteU32s(struct arfBuffer *buffer, const unsigned i
     for (size_t i=0; i<count; i++) { arfBufferWriteU32(buffer,values[i]); }
 }
 
-/** @brief Write a uint32 length followed by the raw UTF-8 bytes, no NUL. */
-static inline void arfBufferWriteString(struct arfBuffer *buffer, const char *text)
+/* -- Big-endian write primitives, for the AAU animation stream -- see the
+ * matching read-side comment above arfCursorReadU16BE(). */
+
+static inline void arfBufferWriteU16BE(struct arfBuffer *buffer, unsigned int value)
+{
+    unsigned char bytes[2];
+    bytes[0] = (unsigned char)((value >> 8) & 0xFF);
+    bytes[1] = (unsigned char)( value       & 0xFF);
+    arfBufferAppend(buffer,bytes,2);
+}
+
+static inline void arfBufferWriteU32BE(struct arfBuffer *buffer, unsigned int value)
+{
+    unsigned char bytes[4];
+    bytes[0] = (unsigned char)((value >> 24) & 0xFF);
+    bytes[1] = (unsigned char)((value >> 16) & 0xFF);
+    bytes[2] = (unsigned char)((value >> 8)  & 0xFF);
+    bytes[3] = (unsigned char)( value        & 0xFF);
+    arfBufferAppend(buffer,bytes,4);
+}
+
+static inline void arfBufferWriteF32BE(struct arfBuffer *buffer, float value)
+{
+    unsigned int bits;
+    memcpy(&bits,&value,4);
+    arfBufferWriteU32BE(buffer,bits);
+}
+
+static inline void arfBufferWriteFloatsBE(struct arfBuffer *buffer, const float *values, size_t count)
+{
+    for (size_t i=0; i<count; i++) { arfBufferWriteF32BE(buffer,values[i]); }
+}
+
+/** @brief Write an 8-bit length followed by the raw UTF-8 bytes, no NUL --
+ *  the AAU config unit's acu_profile_length/acu_animation_profile, distinct
+ *  from this format's other, 32-bit-length-prefixed strings. */
+static inline void arfBufferWriteString8(struct arfBuffer *buffer, const char *text)
 {
     size_t length = strlen(text);
-    arfBufferWriteU32(buffer,(unsigned int) length);
+    arfBufferWriteU8(buffer,(unsigned int) length);
     arfBufferAppend(buffer,text,length);
 }
 

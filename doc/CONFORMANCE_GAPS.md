@@ -19,14 +19,33 @@ to change to produce containers this project can read conformantly — see
 [For SAM3DBody-cpp](#for-sam3dbody-cpp) at the end. It follows the same
 "upstream issue" spirit as [`doc/UPSTREAM_ISSUE.md`](UPSTREAM_ISSUE.md).
 
-**Status: Milestone 1 is implemented** — the numeric-id component graph,
-`structure` as Asset/LOD, and the `id_map.txt` sidecar are done, and
-`samples/summerlove_0.arfz` has been regenerated in the new shape (this was
-a clean cutover: the reader no longer accepts the old string-id shape at
-all). Sections below are marked `[done]` or `[pending]` accordingly. Still
-pending: the AAU bitstream, `LandmarkSet`, `TextureSet`/`TextureTarget`,
-`BlendshapeSet` shapes as GLB. The skin-weight tensor stays sparse for now,
-a deliberate choice, not an oversight — see that section.
+**Status: Milestone 1 (numeric-id component graph) and Milestone 2 (AAU
+bitstream) are implemented.** `structure` as Asset/LOD and the `id_map.txt`
+sidecar are done; `samples/summerlove_0.arfz` has been regenerated twice (once
+per milestone) in the new shapes -- both were clean cutovers, the reader no
+longer accepts the pre-rewrite shapes at all. Sections below are marked
+`[done]` or `[pending]` accordingly. Still pending: `LandmarkSet`,
+`TextureSet`/`TextureTarget`, `BlendshapeSet` shapes as GLB. The skin-weight
+tensor stays sparse for now, a deliberate choice, not an oversight — see
+that section.
+
+**Bug found and fixed after Milestone 1 shipped:** the General Conventions
+clause states plainly, "All references used in the ARF document are to the
+id field of the referred item. Index-based referencing is not used in this
+specification." Milestone 1's first pass got this backwards — it required
+`id == array index` and rejected anything else, which would wrongly reject a
+conformant container from another writer that numbers ids differently. Fixed
+by resolving every JSON-level reference (`Node.parent`, `Skeleton.root`/
+`joints`, `Skin.mesh`/`skeleton`, `BlendshapeSet.baseMesh`) against the
+target's declared `id` field via a real lookup (`arfFindIdIndex()` in
+`arf_reader.c`, a `Map` in `web/arf.js`), the same shape the pre-Milestone-1
+string-id code already used, just keyed on a number instead of a string. The
+writer is unaffected — it still assigns sequential `id == index`, which
+remains a fully valid choice, just no longer a required one. AAU stream
+`_index` fields (`aja_target_joint_index`, `afa_blendshape_index`) are
+unaffected by this — they're positional into their own list by name and by
+design (a real-time binary stream doing id lookups per joint would be an odd
+choice), not document-level `id` references.
 
 ## Scope of this rewrite
 
@@ -214,25 +233,46 @@ means a real choice, not a wire-format fix:
 the tensor bytes themselves are untouched. Revisit if a real interop need
 against another conformant reader ever comes up.
 
-## AAU bitstream
+## AAU bitstream `[done, except AAU_LANDMARK]`
 
-`aau_unit_type` being 7 bits + 1 reserved bit, packed into what's already a
-byte-aligned `uint8` in `arf_format.h`, turns out to be bit-compatible in
-effect — that part of the original worry in `doc/ARF.md` isn't actually a
-problem. The real differences are in the per-type payloads:
+**Correction to what this section originally said:** it claimed
+`aau_unit_type` being 7 bits + 1 reserved bit, packed into what was already a
+byte-aligned `uint8`, was "bit-compatible in effect." That was wrong on a
+closer look: `(unit_type << 1) | reserved` is not the same byte as a raw
+`unit_type` value (type 2 packs to byte `4`, not `2`). It also missed a
+bigger issue entirely: the spec's bitstream tables use `uimsbf` throughout
+(unsigned integer, most significant bit first — the same notation ISOBMFF/
+MPEG-2 Systems use, where it means big-endian), while every field in this
+format was little-endian. Both are now fixed — see
+`arfCursorReadU16BE`/`arfBufferWriteU32BE`/etc. in `arf_bytes.h`, used only
+by the AAU stream; tensors stay little-endian, since Annex E's tensor tables
+don't use bitstream notation at all. The per-type payload differences:
 
-| | current | conformant target |
+| | old | conformant (done) |
 |---|---|---|
-| `AAU_BLENDSHAPE` target reference | a UTF-8 string (`target_blendshape_set_id`) | a 16-bit numeric id |
-| `AAU_BLENDSHAPE` / `AAU_JOINT` counts | 32-bit raw count | 16-bit **count-minus-1** |
-| `AAU_BLENDSHAPE` / `AAU_JOINT` indices | 32-bit | 16-bit |
-| `AAU_JOINT` | no set-id field, no velocity | has a 16-bit joint-set id field the current format is missing entirely, plus an optional per-joint velocity block (flagged by a presence bit) |
-| `AAU_BLENDSHAPE` confidence | a `uint8` flag, always 0 | a single presence *bit* (packed with 7 reserved bits into the same byte), plus an optional per-entry confidence float when set |
-| `AAU_LANDMARK` | doesn't exist | new unit type: a 16-bit landmark-set id, presence bits for velocity/confidence, a 2D-vs-3D flag, 16-bit count-minus-1, then per-entry index + 2 or 3 floats of position + optional velocity/confidence |
+| `AAU_BLENDSHAPE` target reference | a UTF-8 string (`target_blendshape_set_id`) | a big-endian 16-bit numeric id, checked against `blendshapeSets[0].id` |
+| `AAU_JOINT` target reference | none | a big-endian 16-bit `joint_set_id`, checked against `skeletons[0].id` (new field, didn't exist before) |
+| `AAU_BLENDSHAPE` / `AAU_JOINT` counts | 32-bit little-endian raw count | big-endian 16-bit **count-minus-1** |
+| `AAU_BLENDSHAPE` / `AAU_JOINT` indices | 32-bit little-endian | big-endian 16-bit |
+| `AAU_JOINT` velocity | didn't exist | optional per-joint big-endian float32[16], flagged by a presence bit packed with 7 reserved bits into one byte; read and discarded, since nothing here consumes it yet |
+| `AAU_BLENDSHAPE` confidence | a `uint8` flag, always 0 | a single presence *bit* (packed with 7 reserved bits into the same byte), plus an optional per-entry confidence float when set; read and discarded, same as velocity |
+| `AAU_CONFIG` profile string | 32-bit little-endian length prefix (this format's general string convention) | **8-bit** length prefix — the spec gives this one field its own narrower encoding, distinct from every other string in the format (there are no others left after the two rows above) |
 
-This is a self-contained rewrite of the AAU encode/decode paths in
-`arf_reader.c`/`arf_writer.c` plus `arf_format.h`, and needs mirroring in
-`web/arf.js` same as any other format change.
+**Still not implemented:** `AAU_LANDMARK` (type 3) and the `LandmarkSet`
+component it depends on. The type code is recognized
+(`ARF_AAU_LANDMARK` in `arf_format.h`) so a landmark unit in an incoming
+stream is still skipped safely by the generic unrecognized-type path: there
+is nothing here to write one, and nothing to test a reader against without a
+`LandmarkSet` to cross-check it against, so implementing its parsing now
+would be speculative. Revisit alongside `LandmarkSet` itself.
+
+This touched `arf_bytes.h` (new BE primitives + 8-bit string, old 32-bit
+string helpers removed as they became fully unused), `arf_reader.c`/
+`arf_writer.c`'s AAU encode/decode paths, and `web/arf.js`'s mirror.
+`tools/mutate_arf.py` needed two small fixes of its own: it hardcoded
+little-endian when reading/writing the AAU stream's `unit_length` for two of
+its synthetic mutations, which is exactly the kind of collateral damage a
+byte-order change causes in anything else that speaks the wire format.
 
 ## `id_map.txt` sidecar `[done]`
 
@@ -246,20 +286,23 @@ never referenced from `data[]`/`structure`/`components`. Documented in
 
 `ARFWriter` is the thing that actually produces `.arfz` containers, so
 everything above is only real once it emits the conformant shapes.
-`ARFPlayer`'s side of the numeric-id rewrite is now done (this was a clean
-cutover — `libarf` no longer reads the old string-id shape at all), so
-`ARFWriter` needs, concretely:
+`ARFPlayer`'s side is now done for both the numeric-id rewrite and the AAU
+bitstream (both were clean cutovers — `libarf` no longer reads either
+pre-rewrite shape at all), so `ARFWriter` needs, concretely:
 
 * switch every component (`nodes`, `skeletons`, `skins`, `meshes`,
   `blendshapeSets`) from string ids to numeric ids, keeping `name` as a
-  separate field — every component's id equals its index in its own
-  `components.<array>`
+  separate field. Ids do **not** need to equal array position — the spec
+  resolves every reference by id, not index (see the bug note above) — but
+  sequential `id == index` is a perfectly valid choice and the one
+  `ARFPlayer` itself makes, so it's the path of least surprise if `ARFWriter`
+  has no reason to do otherwise
 * replace `structure.animationStreams` with `structure.assets[].lods[]`, and
   drop any field naming the animation stream location — `animations/
   joints.bin` / `animations/face.bin` are convention-located now, not
   declared in `arf.json`
 * rename `data[].mimeType` to `data[].type`, and give every `data[]` entry a
-  numeric `id` (sequential) alongside its existing `name`
+  numeric `id` alongside its existing `name`
 * `Skeleton.inverseBindMatrices` (plural) becomes `inverseBindMatrix`
   (singular) — still one data item for the whole `Nx16` tensor
 * `Mesh.positions`/`Mesh.indices` become `Mesh.data: [positionsId, indicesId]`
@@ -268,15 +311,19 @@ cutover — `libarf` no longer reads the old string-id shape at all), so
   independently
 * skin weights can stay on the sparse encoding — that's a joint decision
   already made on this side, not something `ARFWriter` needs to change
+* rewrite the `AAU_CONFIG`/`AAU_BLENDSHAPE`/`AAU_JOINT` encoders to
+  **big-endian**, the field widths and count-minus-1 convention, the new
+  `aja_joint_set_id`/`afa_blendshape_set_id` fields (write the same id as the
+  corresponding `skeletons[0].id`/`blendshapeSets[0].id`), and the 8-bit
+  profile-string length — see [AAU bitstream](#aau-bitstream-done-except-aau_landmark)
+  for the exact byte layout
 
 Still open, not yet needed for the two sides to agree on today's shape:
 
-* rewrite the `AAU_BLENDSHAPE`/`AAU_JOINT` payload encoders to the field
-  widths and count-minus-1 convention in [AAU bitstream](#aau-bitstream), and
-  add the `aja_joint_set_id` field — pending on `ARFPlayer`'s side too
 * if blendshape/facial tracking export is ever extended, emit each shape as
   its own geometry-only GLB rather than one combined delta tensor — pending
   on `ARFPlayer`'s side too
+* `AAU_LANDMARK`/`LandmarkSet` — pending on `ARFPlayer`'s side too
 
 Recorded here so both sides can move in lockstep instead of `ARFPlayer`
 conforming to a spec that `ARFWriter` no longer produces containers matching.

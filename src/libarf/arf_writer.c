@@ -245,11 +245,12 @@ static void arfWriteSparseWeights(struct arfBuffer *buffer, const struct arfSkin
     arfBufferWriteFloats(buffer,skin->weight,skin->numberOfWeights);
 }
 
-/** @brief Frame one AAU: type byte, payload length, payload. */
+/** @brief Frame one AAU: (type<<1)|reserved byte, big-endian payload length,
+ *  payload -- see the "Avatar Animation Unit framing" note in arf_format.h. */
 static void arfAppendAAU(struct arfBuffer *stream, unsigned int type, const struct arfBuffer *payload)
 {
-    arfBufferWriteU8(stream,type);
-    arfBufferWriteU32(stream,(unsigned int) payload->length);
+    arfBufferWriteU8(stream,type << 1);
+    arfBufferWriteU32BE(stream,(unsigned int) payload->length);
     arfBufferAppend(stream,payload->data,payload->length);
 }
 
@@ -258,15 +259,17 @@ static void arfWriteStreamConfig(struct arfBuffer *stream, const char *profile, 
     struct arfBuffer payload;
     arfBufferInit(&payload);
 
-    arfBufferWriteU32(&payload,0);          /* config units are always at timestamp zero */
-    arfBufferWriteString(&payload,profile);
-    arfBufferWriteF32(&payload,timescale);
+    arfBufferWriteU32BE(&payload,0);          /* config units are always at timestamp zero */
+    arfBufferWriteString8(&payload,profile);
+    arfBufferWriteF32BE(&payload,timescale);
 
     arfAppendAAU(stream,ARF_AAU_CONFIG,&payload);
     arfBufferFree(&payload);
 }
 
-static void arfWriteJointStream(struct arfBuffer *stream, const struct arfAvatar *avatar)
+/** @param skeletonId the declared id of components.skeletons[0], written as
+ *  each frame's aja_joint_set_id. */
+static void arfWriteJointStream(struct arfBuffer *stream, const struct arfAvatar *avatar, int skeletonId)
 {
     arfWriteStreamConfig(stream,ARF_PROFILE_BODY,avatar->timescale);
 
@@ -278,14 +281,16 @@ static void arfWriteJointStream(struct arfBuffer *stream, const struct arfAvatar
         payload.length = 0;
         payload.failed = 0;
 
-        arfBufferWriteU32(&payload,avatar->frameTimestamp[f]);
-        arfBufferWriteU32(&payload,avatar->numberOfNodes);
+        arfBufferWriteU32BE(&payload,avatar->frameTimestamp[f]);
+        arfBufferWriteU16BE(&payload,(unsigned int) skeletonId);
+        arfBufferWriteU8(&payload,0);                              /* velocityPresent=0, reserved=0 */
+        arfBufferWriteU16BE(&payload,avatar->numberOfNodes - 1);   /* jointCountMinus1 */
 
         const float *matrices = avatar->localMatrices + (size_t) f * avatar->numberOfNodes * 16;
         for (unsigned int j=0; j<avatar->numberOfNodes; j++)
         {
-            arfBufferWriteU32(&payload,j);
-            arfBufferWriteFloats(&payload,matrices + (size_t) j * 16,16);
+            arfBufferWriteU16BE(&payload,j);
+            arfBufferWriteFloatsBE(&payload,matrices + (size_t) j * 16,16);
         }
 
         arfAppendAAU(stream,ARF_AAU_JOINT,&payload);
@@ -294,7 +299,9 @@ static void arfWriteJointStream(struct arfBuffer *stream, const struct arfAvatar
     arfBufferFree(&payload);
 }
 
-static void arfWriteFaceStream(struct arfBuffer *stream, const struct arfAvatar *avatar)
+/** @param blendshapeSetId the declared id of components.blendshapeSets[0],
+ *  written as each frame's afa_blendshape_set_id. */
+static void arfWriteFaceStream(struct arfBuffer *stream, const struct arfAvatar *avatar, int blendshapeSetId)
 {
     arfWriteStreamConfig(stream,ARF_PROFILE_FACE,avatar->faceTimescale);
 
@@ -306,16 +313,16 @@ static void arfWriteFaceStream(struct arfBuffer *stream, const struct arfAvatar 
         payload.length = 0;
         payload.failed = 0;
 
-        arfBufferWriteU32(&payload,avatar->faceTimestamp[f]);
-        arfBufferWriteString(&payload,ARF_BLENDSHAPE_SET_ID);
-        arfBufferWriteU8(&payload,0);       /* hasConfidence */
-        arfBufferWriteU32(&payload,avatar->blendshapes.numberOfShapes);
+        arfBufferWriteU32BE(&payload,avatar->faceTimestamp[f]);
+        arfBufferWriteU16BE(&payload,(unsigned int) blendshapeSetId);
+        arfBufferWriteU8(&payload,0);                                        /* confidencePresent=0, reserved=0 */
+        arfBufferWriteU16BE(&payload,avatar->blendshapes.numberOfShapes - 1); /* blendshapeCountMinus1 */
 
         const float *weights = avatar->blendshapeWeights + (size_t) f * avatar->blendshapes.numberOfShapes;
         for (unsigned int s=0; s<avatar->blendshapes.numberOfShapes; s++)
         {
-            arfBufferWriteU32(&payload,s);
-            arfBufferWriteF32(&payload,weights[s]);
+            arfBufferWriteU16BE(&payload,s);
+            arfBufferWriteF32BE(&payload,weights[s]);
         }
 
         arfAppendAAU(stream,ARF_AAU_BLENDSHAPE,&payload);
@@ -624,14 +631,16 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     int inverseBindDims[2] = { (int) avatar->numberOfNodes, 16 };
     arfWriteDenseFloats(&inverseBind,inverseBindDims,2,avatar->skin.inverseBindMatrices);
 
-    arfWriteJointStream(&jointStream,avatar);
+    /* 0 in both calls below: arfWriteJson() always gives the skeleton and
+     * the blendshape set id 0, so the AAU streams target the same ids. */
+    arfWriteJointStream(&jointStream,avatar,0);
 
     if (avatar->hasFace)
     {
         int deltaDims[3] = { (int) avatar->blendshapes.numberOfShapes,
                              (int) avatar->blendshapes.numberOfVertices, 3 };
         arfWriteDenseFloats(&deltas,deltaDims,3,avatar->blendshapes.deltas);
-        arfWriteFaceStream(&faceStream,avatar);
+        arfWriteFaceStream(&faceStream,avatar,0);
     }
 
     arfWriteJson(&json,avatar,positions.length,indices.length,weights.length,inverseBind.length,deltas.length);

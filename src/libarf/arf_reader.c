@@ -158,14 +158,20 @@ struct arfAAUUnit
 };
 
 /** @brief Step to the next unit of a stream.
+ *
+ *  The header's first byte is (unitType<<1)|reserved, seven bits of type
+ *  packed MSB-first with a one-bit reserved field -- not a raw type byte --
+ *  and unitLength is big-endian, per the AAU stream's uimsbf convention. See
+ *  the "Avatar Animation Unit framing" note in arf_format.h.
  *  @retval 1 if a unit was read, 0 at the end of the stream or on a short read */
 static int arfAAUNext(struct arfCursor *cursor, struct arfAAUUnit *unit)
 {
     if (cursor->failed)                     { return 0; }
     if (cursor->offset >= cursor->length)   { return 0; }
 
-    unit->type   = arfCursorReadU8(cursor);
-    unit->length = arfCursorReadU32(cursor);
+    unsigned int header = arfCursorReadU8(cursor);
+    unit->type    = header >> 1;
+    unit->length  = arfCursorReadU32BE(cursor);
     unit->payload = arfCursorTake(cursor,unit->length);
 
     return (cursor->failed==0);
@@ -283,10 +289,42 @@ static void arfDecomposeTransform(const float *m, float *translation, float *rot
     rotation[0]=qx; rotation[1]=qy; rotation[2]=qz; rotation[3]=qw;
 }
 
+/** @brief Position of the array element whose declared numeric id matches
+ *  `wanted`, or -1.
+ *
+ *  The spec's General Conventions clause is explicit: "All references used
+ *  in the ARF document are to the id field of the referred item. Index-based
+ *  referencing is not used in this specification." So a reference's numeric
+ *  value must always be looked up against the target array's own declared
+ *  `id` fields, never used as a direct index -- this project's writer
+ *  happens to assign id == array position, but a reader must not assume
+ *  that of a container it did not write itself. */
+static int arfFindIdIndex(const int *ids, unsigned int count, int wanted)
+{
+    for (unsigned int i=0; i<count; i++) { if (ids[i]==wanted) { return (int) i; } }
+    return -1;
+}
+
+/** @brief Read every declared `array[i].id`, positionally.
+ *  @retval a count-sized array the caller frees, or 0 on allocation failure */
+static int *arfReadDeclaredIds(const struct arfJsonValue *array, unsigned int count)
+{
+    int *ids = (int *) malloc((size_t) count * sizeof(int));
+    if (ids==0) { return 0; }
+
+    for (unsigned int i=0; i<count; i++)
+    {
+        ids[i] = (int) arfJsonNumber(arfJsonMember(arfJsonAt(array,i),"id"),-1.0);
+    }
+    return ids;
+}
+
 /** @brief Read components.nodes into the avatar and resolve the hierarchy.
- *  Ids are numeric (components.nodes[i].id == i, this library's own
- *  convention), so parent/root/joints resolution is a bounds check, not a
- *  name lookup. */
+ *  `parent` values are node ids, looked up against the declared ids of the
+ *  other nodes, not used as direct indices -- see arfFindIdIndex(). Node
+ *  storage order still follows the JSON array order, and every parent must
+ *  still precede its child in that order (checked below); it is only the
+ *  `id` values themselves that need not equal position. */
 static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *components)
 {
     const struct arfJsonValue *nodes = arfJsonMember(components,"nodes");
@@ -298,25 +336,22 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
     if (avatar->nodes==0) { arfSetError("out of memory allocating %u nodes",count); return 0; }
     avatar->numberOfNodes = count;
 
+    int *declaredIds = arfReadDeclaredIds(nodes,count);
+    if (declaredIds==0) { arfSetError("out of memory allocating %u node ids",count); return 0; }
+
     int rootCount = 0;
     for (unsigned int i=0; i<count; i++)
     {
         const struct arfJsonValue *node = arfJsonAt(nodes,i);
         struct arfNode *destination = &avatar->nodes[i];
 
-        int id = (int) arfJsonNumber(arfJsonMember(node,"id"),-1.0);
-        if (id != (int) i)
-        {
-            arfSetError("components.nodes[%u] has id %d, expected %u",i,id,i);
-            return 0;
-        }
-
         const char *name = arfJsonString(arfJsonMember(node,"name"),0);
-        if (name==0) { arfSetError("components.nodes[%u] has no name",i); return 0; }
+        if (name==0) { arfSetError("components.nodes[%u] has no name",i); free(declaredIds); return 0; }
         if (strlen(name) >= ARF_MAX_NAME)
         {
             arfSetError("components.nodes[%u] name \"%s\" is longer than the %d character limit",
                         i,name,ARF_MAX_NAME-1);
+            free(declaredIds);
             return 0;
         }
         strcpy(destination->name,name);
@@ -330,11 +365,13 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
         }
         else
         {
-            destination->parent = (int) arfJsonNumber(parent,-1.0);
-            if ( (destination->parent < 0) || (destination->parent >= (int) count) )
+            int parentId = (int) arfJsonNumber(parent,-1.0);
+            destination->parent = arfFindIdIndex(declaredIds,count,parentId);
+            if (destination->parent < 0)
             {
-                arfSetError("node \"%s\" has parent %d, which is not a valid node index",
-                            destination->name,destination->parent);
+                arfSetError("node \"%s\" has parent id %d, which is not a declared node id",
+                            name,parentId);
+                free(declaredIds);
                 return 0;
             }
         }
@@ -372,6 +409,8 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
         }
     }
 
+    free(declaredIds);
+
     if (rootCount!=1)
     {
         arfSetError("expected exactly one node without a parent, found %d",rootCount);
@@ -400,8 +439,10 @@ static int arfLoadNodes(struct arfAvatar *avatar, const struct arfJsonValue *com
 
 /** @brief Cross-check skeletons[0] against the node list.
  *
- *  AAU jointIndex values index the skeleton's joints array, and the writer
- *  emits it in node order.  If a future writer ever reorders one and not the
+ *  `joints`/`root` are node ids (looked up, not indexed -- see
+ *  arfFindIdIndex()), but AAU jointIndex values are positional into this
+ *  list, so the *resolved position* of joints[i] must equal i regardless of
+ *  what id value it names. If a future writer ever reorders one and not the
  *  other, every joint in the animation silently drives the wrong bone -- so
  *  the agreement is verified rather than trusted. */
 static int arfValidateSkeleton(const struct arfAvatar *avatar, const struct arfJsonValue *components)
@@ -421,22 +462,32 @@ static int arfValidateSkeleton(const struct arfAvatar *avatar, const struct arfJ
         return 0;
     }
 
+    const struct arfJsonValue *nodes = arfJsonMember(components,"nodes");
+    int *nodeIds = arfReadDeclaredIds(nodes,avatar->numberOfNodes);
+    if (nodeIds==0) { arfSetError("out of memory allocating %u node ids",avatar->numberOfNodes); return 0; }
+
     for (unsigned int i=0; i<jointCount; i++)
     {
         int jointId = (int) arfJsonNumber(arfJsonAt(joints,i),-1.0);
-        if (jointId != (int) i)
+        int position = arfFindIdIndex(nodeIds,avatar->numberOfNodes,jointId);
+
+        if (position != (int) i)
         {
-            arfSetError("skeleton joint %u is node id %d, but AAU joint indices assume this list "
-                        "agrees with components.nodes order -- the two orders must agree",
-                        i,jointId);
+            arfSetError("skeleton joint %u is node id %d, at position %d in components.nodes -- "
+                        "AAU joint indices assume this list agrees with components.nodes order",
+                        i,jointId,position);
+            free(nodeIds);
             return 0;
         }
     }
 
     int rootId = (int) arfJsonNumber(arfJsonMember(skeleton,"root"),-1.0);
-    if (rootId != (int) avatar->rootNode)
+    int rootPosition = arfFindIdIndex(nodeIds,avatar->numberOfNodes,rootId);
+    free(nodeIds);
+
+    if (rootPosition != (int) avatar->rootNode)
     {
-        arfSetError("skeleton root is node id %d but the parentless node is \"%s\" (id %u)",
+        arfSetError("skeleton root is node id %d but the parentless node is \"%s\" (position %u)",
                     rootId,avatar->nodes[avatar->rootNode].name,avatar->rootNode);
         return 0;
     }
@@ -743,15 +794,15 @@ static int arfReadStreamConfig(struct arfCursor *cursor, char *profile, float *t
     struct arfCursor payload;
     arfCursorInit(&payload,unit.payload,unit.length);
 
-    arfCursorReadU32(&payload);  /* config timestamp, always zero */
+    arfCursorReadU32BE(&payload);  /* config timestamp, always zero */
 
-    if (!arfCursorReadString(&payload,profile,ARF_MAX_NAME))
+    if (!arfCursorReadString8(&payload,profile,ARF_MAX_NAME))
     {
         arfSetError("%s: AAU_CONFIG profile string is truncated or too long",what);
         return 0;
     }
 
-    *timescale = arfCursorReadF32(&payload);
+    *timescale = arfCursorReadF32BE(&payload);
 
     if (payload.failed)    { arfSetError("%s: AAU_CONFIG payload is truncated",what); return 0; }
     if (!(*timescale > 0)) { arfSetError("%s: AAU_CONFIG timescale is %f, expected a positive rate",what,*timescale); return 0; }
@@ -759,8 +810,10 @@ static int arfReadStreamConfig(struct arfCursor *cursor, char *profile, float *t
     return 1;
 }
 
-/** @brief Decode animations/joints.bin into the avatar's dense frame arrays. */
-static int arfLoadJointStream(struct arfAvatar *avatar, const void *bytes, size_t size)
+/** @brief Decode animations/joints.bin into the avatar's dense frame arrays.
+ *  @param skeletonId the declared id of components.skeletons[0], checked
+ *  against each frame's aja_joint_set_id. */
+static int arfLoadJointStream(struct arfAvatar *avatar, const void *bytes, size_t size, int skeletonId)
 {
     struct arfCursor cursor;
     char profile[ARF_MAX_NAME];
@@ -811,15 +864,26 @@ static int arfLoadJointStream(struct arfAvatar *avatar, const void *bytes, size_
         struct arfCursor payload;
         arfCursorInit(&payload,unit.payload,unit.length);
 
-        avatar->frameTimestamp[frame] = arfCursorReadU32(&payload);
-        unsigned int jointCount       = arfCursorReadU32(&payload);
+        avatar->frameTimestamp[frame] = arfCursorReadU32BE(&payload);
+
+        int frameSkeletonId = (int) arfCursorReadU16BE(&payload);
+        if (frameSkeletonId != skeletonId)
+        {
+            arfSetError("frame %u targets joint set %d but the skeleton is %d",
+                        frame,frameSkeletonId,skeletonId);
+            return 0;
+        }
+
+        unsigned int flags           = arfCursorReadU8(&payload);
+        int          velocityPresent = (flags >> 7) & 1;
+        unsigned int jointCount      = arfCursorReadU16BE(&payload) + 1;
 
         float *matrices = avatar->localMatrices + (size_t) frame * matricesPerFrame;
         for (unsigned int j=0; j<avatar->numberOfNodes; j++) { arfIdentity4x4(matrices + (size_t) j*16); }
 
         for (unsigned int j=0; j<jointCount; j++)
         {
-            unsigned int jointIndex = arfCursorReadU32(&payload);
+            unsigned int jointIndex = arfCursorReadU16BE(&payload);
 
             if (payload.failed) { break; }
             if (jointIndex >= avatar->numberOfNodes)
@@ -829,7 +893,15 @@ static int arfLoadJointStream(struct arfAvatar *avatar, const void *bytes, size_
                 return 0;
             }
 
-            if (!arfCursorReadFloats(&payload,matrices + (size_t) jointIndex*16,16)) { break; }
+            if (!arfCursorReadFloatsBE(&payload,matrices + (size_t) jointIndex*16,16)) { break; }
+
+            if (velocityPresent)
+            {
+                /* Nothing in this library consumes joint velocity yet; read
+                 * and discard it rather than storing it unused. */
+                float discarded[16];
+                if (!arfCursorReadFloatsBE(&payload,discarded,16)) { break; }
+            }
         }
 
         if (payload.failed)
@@ -844,8 +916,10 @@ static int arfLoadJointStream(struct arfAvatar *avatar, const void *bytes, size_
     return 1;
 }
 
-/** @brief Decode animations/face.bin into the avatar's blendshape weight arrays. */
-static int arfLoadFaceStream(struct arfAvatar *avatar, const void *bytes, size_t size)
+/** @brief Decode animations/face.bin into the avatar's blendshape weight arrays.
+ *  @param blendshapeSetId the declared id of components.blendshapeSets[0],
+ *  checked against each frame's afa_blendshape_set_id. */
+static int arfLoadFaceStream(struct arfAvatar *avatar, const void *bytes, size_t size, int blendshapeSetId)
 {
     struct arfCursor cursor;
     char profile[ARF_MAX_NAME];
@@ -885,27 +959,38 @@ static int arfLoadFaceStream(struct arfAvatar *avatar, const void *bytes, size_t
         if (unit.type != ARF_AAU_BLENDSHAPE) { continue; }
 
         struct arfCursor payload;
-        char             targetId[ARF_MAX_NAME];
         arfCursorInit(&payload,unit.payload,unit.length);
 
-        avatar->faceTimestamp[frame] = arfCursorReadU32(&payload);
+        avatar->faceTimestamp[frame] = arfCursorReadU32BE(&payload);
 
-        if (!arfCursorReadString(&payload,targetId,sizeof(targetId)))
+        int frameSetId = (int) arfCursorReadU16BE(&payload);
+        if (frameSetId != blendshapeSetId)
         {
-            arfSetError("face frame %u has an unreadable blendshape set id",frame);
+            arfSetError("face frame %u targets blendshape set %d but the blendshape set is %d",
+                        frame,frameSetId,blendshapeSetId);
             return 0;
         }
 
-        arfCursorReadU8(&payload);  /* hasConfidence, always zero so far */
-        unsigned int entries = arfCursorReadU32(&payload);
+        unsigned int flags             = arfCursorReadU8(&payload);
+        int          confidencePresent = (flags >> 7) & 1;
+        unsigned int entries           = arfCursorReadU16BE(&payload) + 1;
 
         float *weights = avatar->blendshapeWeights + (size_t) frame * shapes;
         for (unsigned int e=0; e<entries; e++)
         {
-            unsigned int index = arfCursorReadU32(&payload);
-            float        value = arfCursorReadF32(&payload);
+            unsigned int index = arfCursorReadU16BE(&payload);
+            float        value = arfCursorReadF32BE(&payload);
 
             if (payload.failed)  { break; }
+
+            if (confidencePresent)
+            {
+                /* Nothing in this library consumes blendshape confidence yet;
+                 * read and discard it rather than storing it unused. */
+                arfCursorReadF32BE(&payload);
+                if (payload.failed) { break; }
+            }
+
             if (index < shapes)  { weights[index] = value; }
         }
 
@@ -1012,11 +1097,27 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
     const struct arfJsonValue *skin = arfJsonAt(arfJsonMember(components,"skins"),0);
     if (skin==0) { arfSetError("components.skins is empty or missing"); goto failed; }
 
+    /* Only one mesh/skeleton is ever loaded, so "resolving" skin.mesh/
+     * skin.skeleton is comparing two declared id values rather than a real
+     * search -- but it must still be a value comparison, not an assumed 0,
+     * since the spec resolves every reference by id, not by position. */
+    const struct arfJsonValue *skeletonForCheck = arfJsonAt(arfJsonMember(components,"skeletons"),0);
+    int meshDeclaredId     = (int) arfJsonNumber(arfJsonMember(mesh,"id"),-1.0);
+    int skeletonDeclaredId = (int) arfJsonNumber(arfJsonMember(skeletonForCheck,"id"),-2.0);
+
     int skinMesh = (int) arfJsonNumber(arfJsonMember(skin,"mesh"),-1.0);
-    if (skinMesh != 0) { arfSetError("skins[0].mesh is %d, expected 0 -- one mesh, one skin",skinMesh); goto failed; }
+    if (skinMesh != meshDeclaredId)
+    {
+        arfSetError("skins[0].mesh is %d, expected %d (meshes[0].id) -- one mesh, one skin",skinMesh,meshDeclaredId);
+        goto failed;
+    }
 
     int skinSkeleton = (int) arfJsonNumber(arfJsonMember(skin,"skeleton"),-1.0);
-    if (skinSkeleton != 0) { arfSetError("skins[0].skeleton is %d, expected 0 -- one skeleton",skinSkeleton); goto failed; }
+    if (skinSkeleton != skeletonDeclaredId)
+    {
+        arfSetError("skins[0].skeleton is %d, expected %d (skeletons[0].id) -- one skeleton",skinSkeleton,skeletonDeclaredId);
+        goto failed;
+    }
 
     if (!arfLoadMesh(avatar,archive,mesh,dataArray))            { goto failed; }
     if (!arfLoadSkin(avatar,archive,components,skin,dataArray)) { goto failed; }
@@ -1028,7 +1129,7 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
     streamBytes = arfExtractEntry(archive,ARF_ENTRY_JOINT_STREAM,&streamSize);
     if (streamBytes==0) { goto failed; }
 
-    if (!arfLoadJointStream(avatar,streamBytes,streamSize)) { goto failed; }
+    if (!arfLoadJointStream(avatar,streamBytes,streamSize,skeletonDeclaredId)) { goto failed; }
     free(streamBytes);
     streamBytes = 0;
 
@@ -1037,10 +1138,11 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
 
     if (blendshapeSet!=0)
     {
+        int blendshapeSetId = (int) arfJsonNumber(arfJsonMember(blendshapeSet,"id"),-3.0);
         int blendshapeBaseMesh = (int) arfJsonNumber(arfJsonMember(blendshapeSet,"baseMesh"),-1.0);
-        if (blendshapeBaseMesh != 0)
+        if (blendshapeBaseMesh != meshDeclaredId)
         {
-            arfSetError("blendshapeSets[0].baseMesh is %d, expected 0",blendshapeBaseMesh);
+            arfSetError("blendshapeSets[0].baseMesh is %d, expected %d (meshes[0].id)",blendshapeBaseMesh,meshDeclaredId);
             goto failed;
         }
 
@@ -1049,7 +1151,7 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
         streamBytes = arfExtractEntry(archive,ARF_ENTRY_FACE_STREAM,&streamSize);
         if (streamBytes==0) { goto failed; }
 
-        if (!arfLoadFaceStream(avatar,streamBytes,streamSize)) { goto failed; }
+        if (!arfLoadFaceStream(avatar,streamBytes,streamSize,blendshapeSetId)) { goto failed; }
         free(streamBytes);
         streamBytes = 0;
 

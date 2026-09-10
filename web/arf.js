@@ -168,9 +168,31 @@ class Cursor
         return out;
     }
 
-    string()
+    /* -- Big-endian reads, for the AAU animation stream only --
+     * Every other binary payload here (tensors) is little-endian, this
+     * project's own convention; the AAU stream's bitstream tables use
+     * "uimsbf" (unsigned integer, most significant bit first), the same
+     * MPEG-systems convention ISOBMFF/MPEG-2 Systems use, where it means
+     * big-endian byte order. Named with an explicit BE suffix so the two
+     * conventions are never mixed up at a call site by accident. */
+    uint16BE() { return this.view.getUint16(this.take(2), false); }
+    uint32BE() { return this.view.getUint32(this.take(4), false); }
+    float32BE() { return this.view.getFloat32(this.take(4), false); }
+
+    floatsBE(count)
     {
-        const length = this.uint32();
+        const at = this.take(count * 4);
+        const out = new Float32Array(count);
+        for (let i = 0; i < count; i++) { out[i] = this.view.getFloat32(at + i * 4, false); }
+        return out;
+    }
+
+    /** An 8-bit-length-prefixed string -- the AAU config unit's profile
+     *  field, distinct from this format's other, 32-bit-length-prefixed
+     *  strings (which nothing in this reader uses any more). */
+    string8()
+    {
+        const length = this.uint8();
         const at = this.take(length);
         return new TextDecoder().decode(this.bytes.subarray(at, at + length));
     }
@@ -275,6 +297,11 @@ function decomposeTransform(m)
 
 /** Walk an animation stream, yielding one unit at a time.
  *
+ *  The header's first byte is (unitType<<1)|reserved, seven bits of type
+ *  packed MSB-first with a one-bit reserved field -- not a raw type byte --
+ *  and unitLength is big-endian, per the AAU stream's uimsbf convention (see
+ *  the equivalent note in src/libarf/arf_format.h).
+ *
  *  Unknown unit types are handed back like any other; skipping them is the
  *  caller's job and is required behaviour, since unitLength exists precisely
  *  so a reader can step over what it does not understand. */
@@ -285,8 +312,9 @@ function* animationUnits(bytes)
 
     while (offset + 5 <= bytes.length)
     {
-        const type   = view.getUint8(offset);
-        const length = view.getUint32(offset + 1, true);
+        const header = view.getUint8(offset);
+        const type   = header >> 1;
+        const length = view.getUint32(offset + 1, false);
         const start  = offset + 5;
 
         if (start + length > bytes.length) { throw new Error('animation stream is truncated'); }
@@ -353,24 +381,26 @@ class Avatar
         this.id   = document.metadata.id   || '0';
 
         /* -- skeleton --
-         * Numeric ids: components.nodes[i].id == i, this library's own
-         * convention (matches src/libarf/arf_reader.c). parent/root/joints
-         * are indices, so resolution is a bounds check, not a name lookup. */
+         * The spec resolves every reference by id, not by array position
+         * ("Index-based referencing is not used in this specification" --
+         * General Conventions clause), so id values need not equal index.
+         * This library's own writer happens to assign id === index, but a
+         * reader must not assume that of a container it did not write. */
         const nodes = components.nodes || [];
         if (nodes.length === 0) { throw new Error('components.nodes is empty or missing'); }
 
+        const nodeIndexOfId = new Map(nodes.map((n, i) => [n.id, i]));
+
         this.nodes = nodes.map((node, i) =>
         {
-            if (node.id !== i) { throw new Error('components.nodes[' + i + '] has id ' + node.id + ', expected ' + i); }
-
             let parent = -1;
             if (node.parent !== undefined)
             {
-                parent = node.parent;
-                if (parent < 0 || parent >= nodes.length)
+                if (!nodeIndexOfId.has(node.parent))
                 {
-                    throw new Error('node "' + node.name + '" has parent ' + parent + ', which is not a valid node index');
+                    throw new Error('node "' + node.name + '" has parent id ' + node.parent + ', which is not a declared node id');
                 }
+                parent = nodeIndexOfId.get(node.parent);
 
                 /* Depended on by composeGlobals, which is a single forward
                  * pass, and it rules out cycles for free. */
@@ -384,11 +414,11 @@ class Avatar
             if (node.transform)
             {
                 const trs = decomposeTransform(node.transform);
-                return { id: i, name: node.name, parent, ...trs };
+                return { id: node.id, name: node.name, parent, ...trs };
             }
 
             return {
-                id: i, name: node.name, parent,
+                id: node.id, name: node.name, parent,
                 translation: node.translation || [0,0,0],
                 rotation: node.rotation || [0,0,0,1],
                 scale: node.scale || [1,1,1],
@@ -399,8 +429,9 @@ class Avatar
         if (roots.length !== 1) { throw new Error('expected exactly one node without a parent, found ' + roots.length); }
         this.rootNode = roots[0];
 
-        /* AAU joint indices address the skeleton's joint list positionally, so
-         * a disagreement here would drive every joint with another joint's
+        /* AAU joint indices are positional into this list (not id-based, per
+         * the field names in clause 8 -- "index", not "id"), so a
+         * disagreement here would drive every joint with another joint's
          * animation, silently. */
         const skeleton = (components.skeletons || [])[0];
         if (!skeleton) { throw new Error('components.skeletons is empty or missing'); }
@@ -411,16 +442,18 @@ class Avatar
         }
         joints.forEach((id, i) =>
         {
-            if (id !== i)
+            const position = nodeIndexOfId.get(id);
+            if (position !== i)
             {
-                throw new Error('skeleton joint ' + i + ' is node id ' + id + ', but AAU joint indices assume this list ' +
-                                'agrees with components.nodes order -- the two orders must agree');
+                throw new Error('skeleton joint ' + i + ' is node id ' + id + ', at position ' + position + ' in components.nodes ' +
+                                '-- AAU joint indices assume this list agrees with components.nodes order');
             }
         });
-        if (skeleton.root !== this.rootNode)
+        const rootPosition = nodeIndexOfId.get(skeleton.root);
+        if (rootPosition !== this.rootNode)
         {
             throw new Error('skeleton root is node id ' + skeleton.root + ' but the parentless node is "' +
-                            this.nodes[this.rootNode].name + '" (id ' + this.rootNode + ')');
+                            this.nodes[this.rootNode].name + '" (position ' + this.rootNode + ')');
         }
 
         /* -- mesh --
@@ -447,11 +480,21 @@ class Avatar
             }
         }
 
-        /* -- skin -- */
+        /* -- skin --
+         * Only one mesh/skeleton is ever loaded, so "resolving" skin.mesh/
+         * skin.skeleton is comparing two declared id values, not a real
+         * search -- but it must still be a value comparison, never an
+         * assumed 0. */
         const skin = (components.skins || [])[0];
         if (!skin) { throw new Error('components.skins is empty or missing'); }
-        if (skin.mesh !== 0) { throw new Error('skins[0].mesh is ' + skin.mesh + ', expected 0 -- one mesh, one skin'); }
-        if (skin.skeleton !== 0) { throw new Error('skins[0].skeleton is ' + skin.skeleton + ', expected 0 -- one skeleton'); }
+        if (skin.mesh !== mesh.id)
+        {
+            throw new Error('skins[0].mesh is ' + skin.mesh + ', expected ' + mesh.id + ' (meshes[0].id) -- one mesh, one skin');
+        }
+        if (skin.skeleton !== skeleton.id)
+        {
+            throw new Error('skins[0].skeleton is ' + skin.skeleton + ', expected ' + skeleton.id + ' (skeletons[0].id) -- one skeleton');
+        }
 
         const weights = readSparse(entry(skin.weights, 'skin.weights'), 'skin weights');
         if (weights.dims[0] !== this.numberOfVertices || weights.dims[1] !== this.nodes.length)
@@ -476,7 +519,7 @@ class Avatar
         const streamBytes = files.get('animations/joints.bin');
         if (!streamBytes) { throw new Error('the joint animation stream is missing'); }
 
-        this.readJointStream(streamBytes);
+        this.readJointStream(streamBytes, skeleton.id);
     }
 
     /** Turn the container's COO weights into per-vertex runs.
@@ -519,7 +562,7 @@ class Avatar
         this.numberOfWeights = count;
     }
 
-    readJointStream(bytes)
+    readJointStream(bytes, skeletonId)
     {
         const jointCount = this.nodes.length;
         const frames = [];
@@ -530,9 +573,9 @@ class Avatar
             if (unit.type === AAU_CONFIG)
             {
                 const cursor = new Cursor(unit.payload, 'AAU_CONFIG');
-                cursor.uint32();                 /* config timestamp, always zero */
-                this.profile = cursor.string();
-                timescale = cursor.float32();
+                cursor.uint32BE();                /* config timestamp, always zero */
+                this.profile = cursor.string8();
+                timescale = cursor.float32BE();
                 continue;
             }
 
@@ -540,17 +583,30 @@ class Avatar
             if (unit.type !== AAU_JOINT) { continue; }
 
             const cursor = new Cursor(unit.payload, 'an AAU_JOINT frame');
-            const timestamp = cursor.uint32();
-            const driven = cursor.uint32();
+            const timestamp = cursor.uint32BE();
+
+            const frameSkeletonId = cursor.uint16BE();
+            if (frameSkeletonId !== skeletonId)
+            {
+                throw new Error('frame targets joint set ' + frameSkeletonId + ' but the skeleton is ' + skeletonId);
+            }
+
+            const flags = cursor.uint8();
+            const velocityPresent = (flags >> 7) & 1;
+            const driven = cursor.uint16BE() + 1;   /* jointCountMinus1 */
 
             const matrices = new Float32Array(jointCount * 16);
             for (let j = 0; j < jointCount; j++) { matrices[j * 16] = matrices[j * 16 + 5] = matrices[j * 16 + 10] = matrices[j * 16 + 15] = 1; }
 
             for (let j = 0; j < driven; j++)
             {
-                const index = cursor.uint32();
+                const index = cursor.uint16BE();
                 if (index >= jointCount) { throw new Error('a frame drives joint index ' + index + ' of ' + jointCount); }
-                matrices.set(cursor.floats(16), index * 16);
+                matrices.set(cursor.floatsBE(16), index * 16);
+
+                /* Nothing here consumes joint velocity yet; read and discard
+                 * it rather than storing it unused. */
+                if (velocityPresent) { cursor.floatsBE(16); }
             }
 
             frames.push({ timestamp, matrices });

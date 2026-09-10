@@ -48,8 +48,12 @@ copyright in their own publications regardless of this project's license.
 
 ## Container
 
-A `.arfz` is a plain ZIP. All integers and floats in the binary payloads are
-little-endian.
+A `.arfz` is a plain ZIP. Integers and floats in the dense/sparse tensor
+payloads are little-endian, this project's own convention. The AAU animation
+stream is the one exception: its bitstream tables use `uimsbf` (unsigned
+integer, most significant bit first), the same MPEG-systems convention
+ISOBMFF/MPEG-2 Systems use, where it means big-endian — see
+"Avatar Animation Units" below.
 
 ```
 <stem>_<id>.arfz
@@ -185,42 +189,61 @@ that wants per-vertex runs has to build them rather than assume them.
 
 ## Avatar Animation Units
 
-An animation stream is a bare concatenation of units — no stream header:
+An animation stream is a bare concatenation of units — no stream header. All
+multi-byte fields in this section are **big-endian** (see the note in
+"Container" above), unlike the little-endian tensors elsewhere in the
+container:
 
 ```
-uint8   unit_type       0 AAU_CONFIG, 1 AAU_BLENDSHAPE, 2 AAU_JOINT
-uint32  unit_length     payload bytes that follow
-byte[]  payload
+uint7BE unit_type, uint1 reserved   packed into one byte: (unit_type<<1)|reserved
+                                     0 AAU_CONFIG, 1 AAU_BLENDSHAPE, 2 AAU_JOINT
+uint32BE unit_length                payload bytes that follow
+byte[]   payload
 ```
 
-Strings inside a payload are `uint32 length` followed by that many raw UTF-8
-bytes, with no terminating NUL.
+Every payload starts with a big-endian `uint32` timestamp, then its
+type-specific fields:
 
 ```
-AAU_CONFIG      uint32  timestamp (always 0)
-                string  profile             "arf-body-v1" | "arf-face-v1"
-                float32 timescale           ticks per second, i.e. fps
+AAU_CONFIG      uint32BE timestamp (always 0)
+                uint8    profile_length
+                byte[profile_length] profile   "arf-body-v1" | "arf-face-v1",
+                                                a single length byte, no NUL
+                float32BE timescale             ticks per second, i.e. fps
 
-AAU_JOINT       uint32  timestamp_ticks     == frame index
-                uint32  n_joints
-                { uint32 joint_index; float32 local_matrix[16] } * n_joints
+AAU_JOINT       uint32BE timestamp_ticks       == frame index
+                uint16BE joint_set_id           the skeleton's declared id
+                uint1 velocity_present, uint7 reserved   packed into one byte
+                uint16BE joint_count_minus1
+                { uint16BE joint_index; float32BE local_matrix[16];
+                  float32BE velocity[16] if velocity_present }
+                  * (joint_count_minus1 + 1)
 
-AAU_BLENDSHAPE  uint32  timestamp_ticks
-                string  target_blendshape_set_id    "face_expression"
-                uint8   has_confidence              (always 0)
-                uint32  n_entries
-                { uint32 blendshape_index; float32 weight } * n_entries
+AAU_BLENDSHAPE  uint32BE timestamp_ticks
+                uint16BE blendshape_set_id      the blendshape set's declared id
+                uint1 confidence_present, uint7 reserved   packed into one byte
+                uint16BE blendshape_count_minus1
+                { uint16BE blendshape_index; float32BE weight;
+                  float32BE confidence if confidence_present }
+                  * (blendshape_count_minus1 + 1)
 ```
 
 The first unit of every stream is an `AAU_CONFIG`. One tick is one frame —
 timestamps are integers deliberately, to avoid float drift — so wall-clock
 time is `timestamp / timescale` seconds.
 
+This library never has velocity or confidence data to emit, so the writer
+always clears those presence bits; a reader still has to parse them correctly
+(and discard the optional fields) for a container that sets them.
+
 **Unknown unit types must be skipped, not treated as an error.**
 `unit_length` exists precisely so a reader can step over units it does not
 understand. This is the format's only forward-compatibility hook, and a reader
 that rejects an unknown type will break the first time the writer gains a new
-one.
+one. `AAU_LANDMARK` (type 3) is one such type today — this library recognizes
+the code but has no `LandmarkSet` component to hang it off yet, so a landmark
+unit is skipped the same way any other unrecognized type is; see
+[doc/CONFORMANCE_GAPS.md](CONFORMANCE_GAPS.md).
 
 ## Conventions
 

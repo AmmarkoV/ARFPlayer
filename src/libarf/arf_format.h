@@ -130,45 +130,70 @@ extern "C"
  * -------------------------------------------------------------------------*/
 
 /* ---------------------------------------------------------------------------
- *  Avatar Animation Unit framing (writer: append_aau)
+ *  Avatar Animation Unit framing
  * ---------------------------------------------------------------------------
- *  An animation stream is a bare concatenation of units, no stream header:
+ *  An animation stream is a bare concatenation of units, no stream header.
+ *  Unlike every other binary payload in this format, the AAU stream is
+ *  BIG-ENDIAN: the spec's bitstream tables use "uimsbf" (unsigned integer,
+ *  most significant bit first), the same MPEG-systems convention ISOBMFF and
+ *  MPEG-2 Systems use, where it means big-endian byte order. Fields below are
+ *  marked BE; anything not marked BE is a single byte, where endianness does
+ *  not apply.
  *
- *    uint8   unitType                ARF_AAU_*
- *    uint32  unitLength              payload bytes that follow
+ *    uint7BE unitType, uint1 reserved   packed into one byte: (type<<1)|reserved
+ *    uint32BE unitLength                payload bytes that follow
  *    byte[]  payload
  *
  *  unitLength exists so that a reader can step over unit types it does not
  *  understand.  Skipping an unknown unit is REQUIRED behaviour, not an error --
  *  it is the format's only forward-compatibility hook.
  *
- *  Strings inside a payload are  uint32 length  followed by that many raw UTF-8
- *  bytes, with no terminating NUL.
+ *  Every payload starts with a big-endian uint32 timestamp, then its
+ *  type-specific fields:
  *
- *    AAU_CONFIG      uint32  timestamp (always 0)
- *                    string  profile            "arf-body-v1" | "arf-face-v1"
- *                    float32 timescale          ticks per second == fps
+ *    AAU_CONFIG      uint32BE timestamp (always 0)
+ *                    uint8    profileLength
+ *                    byte[profileLength] profile   "arf-body-v1" | "arf-face-v1",
+ *                                                   no length-prefix beyond the
+ *                                                   one byte above, no NUL
+ *                    float32BE timescale           ticks per second == fps
  *
- *    AAU_JOINT       uint32  timestampTicks     == frame index
- *                    uint32  numberOfJoints
- *                    { uint32 jointIndex; float32 localMatrix[16]; } * numberOfJoints
+ *    AAU_JOINT       uint32BE timestampTicks       == frame index
+ *                    uint16BE jointSetId            the skeleton's declared id
+ *                    uint1 velocityPresent, uint7 reserved   packed into one byte
+ *                    uint16BE jointCountMinus1
+ *                    { uint16BE jointIndex; float32BE localMatrix[16];
+ *                      float32BE velocity[16] if velocityPresent; }
+ *                      * (jointCountMinus1 + 1)
  *
- *    AAU_BLENDSHAPE  uint32  timestampTicks
- *                    string  targetBlendshapeSetId    "face_expression"
- *                    uint8   hasConfidence            (always 0)
- *                    uint32  numberOfEntries
- *                    { uint32 blendshapeIndex; float32 weight; } * numberOfEntries
+ *    AAU_BLENDSHAPE  uint32BE timestampTicks
+ *                    uint16BE blendshapeSetId       the blendshape set's declared id
+ *                    uint1 confidencePresent, uint7 reserved   packed into one byte
+ *                    uint16BE blendshapeCountMinus1
+ *                    { uint16BE blendshapeIndex; float32BE weight;
+ *                      float32BE confidence if confidencePresent; }
+ *                      * (blendshapeCountMinus1 + 1)
  *
  *  The first unit of every stream is an AAU_CONFIG.  One tick is one frame --
  *  timestamps are integers on purpose, to avoid float drift -- so wall-clock
  *  time is  timestamp / timescale  seconds.
+ *
+ *  This library never has velocity or confidence data to emit, so the writer
+ *  always clears those presence bits; the reader still has to parse them
+ *  correctly (and discard the optional fields) for a container that sets them.
+ *
+ *  Not implemented: AAU_LANDMARK (type 3) and the LandmarkSet component it
+ *  depends on -- see doc/CONFORMANCE_GAPS.md. A landmark unit in an incoming
+ *  stream is still skipped safely by the unitLength mechanism above, same as
+ *  any other type this reader does not specifically handle.
  * -------------------------------------------------------------------------*/
 
 #define ARF_AAU_CONFIG      0
 #define ARF_AAU_BLENDSHAPE  1
 #define ARF_AAU_JOINT       2
+#define ARF_AAU_LANDMARK    3
 
-#define ARF_AAU_HEADER_BYTES 5  /* uint8 unitType + uint32 unitLength */
+#define ARF_AAU_HEADER_BYTES 5  /* packed (type<<1)|reserved byte + uint32BE unitLength */
 
 #ifdef __cplusplus
 }

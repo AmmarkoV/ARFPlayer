@@ -77,8 +77,10 @@ def mutants(source: str, directory: str):
     rebuild(source, swapped, {"arf.json": json.dumps(reordered).encode()})
     yield "skeleton joint order disagrees with nodes", swapped, False
 
-    # The animation stream carries only its config unit.
-    config_length = struct.unpack_from("<I", stream, 1)[0]
+    # The animation stream carries only its config unit.  unit_length is a
+    # big-endian uint32 (the AAU stream's own convention, distinct from every
+    # other binary payload in this format -- see arf_format.h).
+    config_length = struct.unpack_from(">I", stream, 1)[0]
     empty = path("zero_frames")
     rebuild(source, empty, {"animations/joints.bin": stream[: 5 + config_length]})
     yield "zero frame animation stream", empty, False
@@ -90,7 +92,7 @@ def mutants(source: str, directory: str):
 
     # An AAU type from a future writer, sitting between two real frames.  This
     # one MUST still load: unit_length exists so readers can step over it.
-    unknown = struct.pack("<BI", 99, 8) + b"\x00" * 8
+    unknown = struct.pack(">BI", 99, 8) + b"\x00" * 8
     head = 5 + config_length
     forward = path("unknown_aau")
     rebuild(source, forward, {"animations/joints.bin": stream[:head] + unknown + stream[head:]})
