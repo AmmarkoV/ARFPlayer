@@ -52,6 +52,7 @@ endif()
 # ---------------------------------------------------------------------------
 set(LIBARF_SOURCES
     src/libarf/arf_json.c
+    src/libarf/arf_glb.c
     src/libarf/arf_reader.c
     src/libarf/arf_writer.c
     src/libarf/arf_skin.c

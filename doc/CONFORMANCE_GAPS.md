@@ -19,19 +19,21 @@ to change to produce containers this project can read conformantly — see
 [For SAM3DBody-cpp](#for-sam3dbody-cpp) at the end. It follows the same
 "upstream issue" spirit as [`doc/UPSTREAM_ISSUE.md`](UPSTREAM_ISSUE.md).
 
-**Status: Milestone 1 (numeric-id component graph), Milestone 2 (AAU
-bitstream), Milestone 3 (`LandmarkSet`/`AAU_LANDMARK`) and Milestone 4
-(`TextureSet`/`TextureTarget`) are implemented.** `structure` as Asset/LOD
-and the `id_map.txt` sidecar are done; `samples/summerlove_0.arfz` has been
-regenerated across the milestones that changed its shape -- all clean
-cutovers, the reader no longer accepts a pre-rewrite shape at all.
-`LandmarkSet` and `TextureSet` have no real data source in this codebase
-(no landmark tracking, no textured avatars), so both were verified with
-synthetic round trips through the Python bindings rather than against a real
-sample -- see their sections for details. Sections below are marked
-`[done]` or `[pending]` accordingly. Still pending: `BlendshapeSet` shapes as
-GLB. The skin-weight tensor stays sparse for now, a deliberate choice, not
-an oversight — see that section.
+**Status: every item originally scoped in is now implemented** --
+Milestone 1 (numeric-id component graph), Milestone 2 (AAU bitstream),
+Milestone 3 (`LandmarkSet`/`AAU_LANDMARK`), Milestone 4
+(`TextureSet`/`TextureTarget`) and Milestone 5 (`BlendshapeSet.shapes` as
+per-shape GLB). `structure` as Asset/LOD and the `id_map.txt` sidecar are
+done; `samples/summerlove_0.arfz` has been regenerated across the
+milestones that changed its shape -- all clean cutovers, the reader no
+longer accepts a pre-rewrite shape at all. `LandmarkSet` and `TextureSet`
+have no real data source in this codebase (no landmark tracking, no
+textured avatars), so both were verified with synthetic round trips
+through the Python bindings rather than against a real sample -- see their
+sections for details. Sections below are marked `[done]` throughout now.
+The one remaining, deliberate deviation from the spec is the sparse
+skin-weight tensor (the spec only defines a dense one) -- a documented
+choice, not an oversight, see that section for why it stays that way.
 
 **Bug found and fixed after Milestone 1 shipped:** the General Conventions
 clause states plainly, "All references used in the ARF document are to the
@@ -60,7 +62,7 @@ choice), not document-level `id` references.
 * `[done]` the `structure` Asset/LOD model
 * `[done]` the AAU bitstream (field widths, `AAU_LANDMARK`)
 * `[done]` `LandmarkSet`
-* `[pending]` `BlendshapeSet` shapes as bare-geometry GLB instead of raw delta tensors
+* `[done]` `BlendshapeSet` shapes as bare-geometry GLB instead of raw delta tensors
 * `[done]` `TextureSet`/`TextureTarget`, as a static asset declaration (no
   AAU counterpart exists to animate it), declaration-only `AnimationLink`
   (no cross-framework retargeting runtime)
@@ -167,13 +169,84 @@ together, per spec, rather than a thin name-matching shim:
 | `path` | done, as an honest placeholder (same caveat as `Node.mapping`) |
 | `data` | done as `[positions data id, indices data id]` — this project's own documented convention (`arf_format.h`), since the spec text available here doesn't prescribe the slot order beyond "mesh data" |
 
-## `BlendshapeSet` `[id/name/baseMesh done, shapes pending]`
+## `BlendshapeSet` `[done]`
 
 | field | status |
 |---|---|
 | `id`, `name`, `baseMesh` | done — numeric ids, `baseMesh` cross-checked to be `0` |
-| `shapes` | **still pending.** Today: `shapes` is a one-element array naming a single data item that holds one dense tensor of raw per-vertex position deltas, `[n_shapes, n_verts, 3]` float32. **Spec**: an array of numeric data-item references, each pointing at its own GLB file containing *only* geometry (vertices + faces, no materials/textures) for that one shape. This is a bigger change than a field rename — it means encoding/decoding minimal GLB (JSON chunk + BIN chunk, accessors, bufferViews), one file per blendshape target, and building the delta against the base mesh rather than storing a pre-computed delta blob. |
+| `shapes` | done — array of numeric data-item ids, one GLB file per blendshape target |
 | `animationInfo` | not added, optional, skipped under scope decision |
+
+`shapes[i]` used to name a single data item holding one dense tensor of raw
+per-vertex position deltas for every shape at once, `[n_shapes, n_verts, 3]`
+float32 — this project's own convention, not the spec. Now each `shapes[i]`
+is its own data item, a minimal GLB (binary glTF) file with only geometry
+(one `POSITION` accessor, one indices accessor, no materials or textures),
+whose topology must match `baseMesh` exactly — both requirements straight
+from the spec text.
+
+**The harder part wasn't the file format, it was the semantics.** A shape's
+GLB stores its **absolute** deformed vertex positions, not a delta: the
+spec's blend formula is `v_out = v_0 + sum_i(w_i * (v_i - v_0))`, i.e. `v_i`
+(what's stored) minus `v_0` (the base mesh) is the delta, computed at blend
+time — it is not what gets written to disk. `libarf`'s runtime keeps working
+in deltas internally regardless (`arfBlendshapes.deltas`,
+`arfApplyBlendshapes()` — both completely unchanged), so the
+absolute-vs-delta conversion happens only at the read/write boundary: the
+writer adds the base mesh back once per shape before encoding its GLB, the
+reader subtracts it once after decoding. No public API changed —
+`arfEnableFace()`/`arfAppendFaceFrame()` still take deltas, exactly as
+before this milestone.
+
+That conversion has a real, if usually small, precision cost: `(base +
+delta) - base` is not always exactly `delta` in float32 — a shape's stored
+absolute position sits at the base mesh's coordinate magnitude
+(centimetres, order 10^2), while a fine facial delta can be two or three
+orders of magnitude smaller, so the round trip can lose a meaningful
+fraction of that delta's precision to rounding. Measured on a synthetic
+test: deltas around 0.05–0.2 round-tripped to within ~4e-7 absolute error —
+negligible here, but this is a genuine property of the spec's storage
+choice, not a bug to route around, and is documented as such in
+`arf_format.h`/`doc/ARF.md`.
+
+Implemented in a new, self-contained module, `src/libarf/arf_glb.{c,h}`
+(~250 lines): `arfGlbWriteMesh()`/`arfGlbReadMesh()`, a minimal binary glTF
+encoder/decoder — one mesh, one primitive, `POSITION` + indices, no
+materials or textures, not a general-purpose glTF library. It reuses this
+project's existing JSON parser (`arf_json.c`) for the GLB's embedded JSON
+chunk rather than writing a second one, and the existing little-endian
+cursor/buffer helpers in `arf_bytes.h` (GLB is little-endian throughout,
+like every other payload here except the AAU stream). The reader rejects
+anything with a different shape (multiple buffers, unexpected component
+types, a missing BIN chunk) rather than guessing, and additionally checks a
+shape's indices are byte-identical to the base mesh's, not just
+equal-count, since the spec requires identical topology.
+
+Since `shapes` is now variable in count (as many GLBs as there are
+blendshape targets — the real pipeline's own face export uses 72), and
+`TextureSet`'s targets already made data ids variable in count too, the
+writer's `data[].id` assignment was generalized from individual fixed
+constants to a single running counter computed once per save (`struct
+arfDataIdPlan` in `arf_writer.c`): `mesh_positions`/`mesh_indices`/
+`skin_weights`/`inverseBind` stay fixed at `0`–`3` (always exactly one
+instance, in that order), and every optional/variable component after them
+— blendshape shapes, landmark vertices, the texture material and its
+targets — gets the next id in whatever order it's actually present, rather
+than a value baked in at compile time. This is transparent to readers: they
+already resolved every reference by id lookup (a real search over `data[]`),
+never by treating an id as a direct index — see the id/index bug note near
+the top of this document.
+
+Verified with a synthetic round trip through the Python bindings (the
+`enable_face`/`append_face_frame` API is completely unchanged): a small quad
+mesh (4 vertices, 2 triangles — enough to exercise real indexing, unlike a
+single-triangle toy case) with two blendshape targets, saved and reloaded,
+deltas compared against the originals within float32 tolerance. Each
+resulting `.glb` was additionally parsed with fresh, independent Python code
+(not this project's own `arf_glb.c`) to confirm it is genuinely valid binary
+glTF — correct header, correct chunk framing, a standard accessor/
+bufferView/mesh JSON structure any glTF viewer would recognize — not just
+bytes this library alone can make sense of.
 
 ## `LandmarkSet` `[done]`
 
@@ -376,6 +449,15 @@ pre-rewrite shape at all), so `ARFWriter` needs, concretely:
   independently
 * skin weights can stay on the sparse encoding — that's a joint decision
   already made on this side, not something `ARFWriter` needs to change
+* `BlendshapeSet.shapes[i]` becomes one minimal GLB file per blendshape
+  target (geometry only, no materials/textures, topology identical to the
+  base mesh) instead of one combined dense delta tensor — and each GLB's
+  `POSITION` accessor must hold that shape's **absolute** vertex positions
+  (base mesh + delta), not the delta itself; the blend formula subtracts the
+  base mesh back out at blend time. See
+  [BlendshapeSet](#blendshapeset-done) for the exact reasoning and the
+  float32-precision note; `arf_glb.c` is a small enough reference encoder/
+  decoder to build a compatible writer from directly if useful
 * rewrite the `AAU_CONFIG`/`AAU_BLENDSHAPE`/`AAU_JOINT` encoders to
   **big-endian**, the field widths and count-minus-1 convention, the new
   `aja_joint_set_id`/`afa_blendshape_set_id` fields (write the same id as the
@@ -395,11 +477,8 @@ pre-rewrite shape at all), so `ARFWriter` needs, concretely:
   `Skin` side. See [TextureSet/TextureTarget](#textureset--texturetarget-done)
   for the exact JSON shape and the `animationInfo`/`materialPath` conventions
 
-Still open, not yet needed for the two sides to agree on today's shape:
-
-* if blendshape/facial tracking export is ever extended, emit each shape as
-  its own geometry-only GLB rather than one combined delta tensor — pending
-  on `ARFPlayer`'s side too
+Nothing is left "still open" on `ARFPlayer`'s side at this point — every
+item above is implemented and waiting for `ARFWriter` to match it.
 
 Recorded here so both sides can move in lockstep instead of `ARFPlayer`
 conforming to a spec that `ARFWriter` no longer produces containers matching.

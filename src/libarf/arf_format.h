@@ -4,13 +4,13 @@
  *
  *  Conformance status, see doc/CONFORMANCE_GAPS.md for the full accounting:
  *  the JSON document's component graph (numeric ids/indices, `structure` as
- *  Asset/LOD, `LandmarkSet`) and the AAU bitstream (field widths, big-endian
- *  byte order, `AAU_LANDMARK`) match ISO/IEC 23090-39 as read from the
- *  FDIS-stage text.  The sparse skin-weight tensor (the spec only defines a
- *  dense one) and `BlendshapeSet.shapes` (raw deltas here, GLB targets in the
- *  spec) are still this project's own convention, inherited from the
- *  original SAM3DBody-flavoured design.  This is NOT yet a fully
- *  certified-conformant implementation.
+ *  Asset/LOD, `LandmarkSet`, `TextureSet`/`TextureTarget`), the AAU bitstream
+ *  (field widths, big-endian byte order, `AAU_LANDMARK`), and
+ *  `BlendshapeSet.shapes` as per-shape GLB targets all match ISO/IEC 23090-39
+ *  as read from the FDIS-stage text.  The sparse skin-weight tensor (the spec
+ *  only defines a dense one) is still this project's own convention,
+ *  inherited from the original SAM3DBody-flavoured design.  This is NOT yet
+ *  a fully certified-conformant implementation.
  *
  *  Everything this library assumes about the byte layout is stated here, so
  *  that when a container stops loading there is exactly one file to diff
@@ -39,7 +39,7 @@ extern "C"
  *    data/mesh_indices.bin       dense  [n_tris, 3]            uint32
  *    data/skin_weights.bin       sparse dims [n_verts, n_joints]
  *    data/inv_bind_pose.bin      dense  [n_joints, 16]         float32
- *    data/face_blendshapes.bin   dense  [n_shapes, n_verts, 3] float32  (optional)
+ *    data/face_blendshape_<i>.glb GLB, one per blendshape target          (optional)
  *    data/landmark_vertices.bin  dense  [n_landmarks]          uint32   (optional)
  *    data/texture_material.bin   opaque image bytes                     (optional)
  *    data/texture_target_<i>.bin opaque image bytes, one per target     (optional)
@@ -47,7 +47,8 @@ extern "C"
  *    animations/face.bin         AAU_CONFIG + one AAU_BLENDSHAPE per frame (optional)
  *    animations/landmarks.bin    AAU_CONFIG + one AAU_LANDMARK per frame (optional)
  *
- *  Every integer and float in the binary payloads is little-endian.
+ *  Every integer and float in the binary payloads is little-endian -- GLB
+ *  included; only the AAU animation stream is big-endian (see below).
  *
  *  Texture material/target data items are opaque: their data[].type carries
  *  a real image MIME type (e.g. "image/png"), and this library never decodes
@@ -59,9 +60,15 @@ extern "C"
  *
  *  arf.json's `structure`/`components` use numeric ids: every component's id
  *  is its index within its own components.<array>, e.g. components.nodes[i]
- *  has id i.  Since this library only ever holds one mesh/skin/skeleton/
- *  blendshapeSet, those always get id 0.  animations/ streams are located by
- *  the fixed paths above -- the spec's Zip-container clause locates them by
+ *  has id i.  Since this library only ever holds one mesh/skin/skeleton, those
+ *  always get id 0.  data[] ids are a running count instead, in this order --
+ *  mesh_positions=0, mesh_indices=1, skin_weights=2, inverse_bind=3, then
+ *  each blendshape shape (if any), then landmark_vertices (if any), then the
+ *  texture material and each texture target (if any) -- since blendshape
+ *  shapes and texture targets are both variable in count, no data id past 3
+ *  is a fixed compile-time constant any more; see arfSave()'s running
+ *  nextDataId in arf_writer.c.  animations/ streams are located by the fixed
+ *  paths above -- the spec's Zip-container clause locates them by
  *  convention, there is no arf.json field naming them.
  * -------------------------------------------------------------------------*/
 
@@ -71,46 +78,46 @@ extern "C"
 #define ARF_ENTRY_MESH_INDICES    "data/mesh_indices.bin"
 #define ARF_ENTRY_SKIN_WEIGHTS    "data/skin_weights.bin"
 #define ARF_ENTRY_INV_BIND_POSE   "data/inv_bind_pose.bin"
-#define ARF_ENTRY_FACE_DELTAS     "data/face_blendshapes.bin"
+/* sprintf(name, ARF_ENTRY_FACE_SHAPE_FORMAT, shapeIndex) -- one GLB per
+ * blendshape target; see the BlendshapeSet note further down. */
+#define ARF_ENTRY_FACE_SHAPE_FORMAT "data/face_blendshape_%u.glb"
 #define ARF_ENTRY_LANDMARK_VERTICES "data/landmark_vertices.bin"
 #define ARF_ENTRY_TEXTURE_MATERIAL  "data/texture_material.bin"
 /* sprintf(name, ARF_ENTRY_TEXTURE_TARGET_FORMAT, targetIndex) -- one file per
- * texture target, since the count is variable, unlike every other data item
- * here which is fixed at one instance. */
+ * texture target, since the count is variable. */
 #define ARF_ENTRY_TEXTURE_TARGET_FORMAT "data/texture_target_%u.bin"
 #define ARF_ENTRY_JOINT_STREAM    "animations/joints.bin"
 #define ARF_ENTRY_FACE_STREAM     "animations/face.bin"
 #define ARF_ENTRY_LANDMARK_STREAM "animations/landmarks.bin"
 
 /* data[].name for each data item -- descriptive only, arf.json resolves
- * component -> data references by data[].id (below), not by this string. */
+ * component -> data references by data[].id, a running count -- see the
+ * Container note above -- not by this string. */
 #define ARF_ID_MESH_POSITIONS     "mesh_positions"
 #define ARF_ID_MESH_INDICES       "mesh_indices"
 #define ARF_ID_SKIN_WEIGHTS       "skin_weights"
 #define ARF_ID_INVERSE_BIND       "inverse_bind_matrices"
-#define ARF_ID_FACE_DELTAS        "face_blendshape_deltas"
+/* sprintf(name, ARF_ID_FACE_SHAPE_FORMAT, shapeIndex) */
+#define ARF_ID_FACE_SHAPE_FORMAT  "face_blendshape_%u"
 #define ARF_ID_LANDMARK_VERTICES  "landmark_vertices"
 #define ARF_ID_TEXTURE_MATERIAL   "texture_material"
 /* sprintf(name, ARF_ID_TEXTURE_TARGET_FORMAT, targetIndex) */
 #define ARF_ID_TEXTURE_TARGET_FORMAT "texture_target_%u"
 
-/* data[].id for each data item -- what component fields (Skeleton.
- * inverseBindMatrix, Skin.weights, Mesh.data[], BlendshapeSet.shapes[],
- * LandmarkSet.vertices) actually reference. */
-#define ARF_DATA_ID_MESH_POSITIONS  0
-#define ARF_DATA_ID_MESH_INDICES    1
-#define ARF_DATA_ID_SKIN_WEIGHTS    2
-#define ARF_DATA_ID_INVERSE_BIND    3
-#define ARF_DATA_ID_FACE_DELTAS     4
-#define ARF_DATA_ID_LANDMARK_VERTICES 5
-/* Texture material is id 6, targets are 7, 8, ... -- the first variable-
- * count data item this format writes; every other one above is fixed at
- * exactly one instance. */
-#define ARF_DATA_ID_TEXTURE_MATERIAL 6
-#define ARF_DATA_ID_TEXTURE_TARGET_FIRST 7
+/* data[].id for the four data items that are always present, always in this
+ * order, one instance each -- unlike every data item that can follow them
+ * (blendshape shapes, landmark vertices, the texture material and its
+ * targets), which are optional and/or variable in count, so they are a
+ * running count computed once in arfSave() (struct arfDataIdPlan) instead
+ * of fixed constants. */
+#define ARF_DATA_ID_MESH_POSITIONS 0
+#define ARF_DATA_ID_MESH_INDICES   1
+#define ARF_DATA_ID_SKIN_WEIGHTS   2
+#define ARF_DATA_ID_INVERSE_BIND   3
 
 #define ARF_MIME_DENSE            "application/mpeg.arf.dense"
 #define ARF_MIME_SPARSE           "application/mpeg.arf.sparse"
+#define ARF_MIME_GLB              "model/gltf-binary"
 
 #define ARF_SIGNATURE             "ARF"
 #define ARF_CONTAINER_VERSION     "1.0"
@@ -188,9 +195,9 @@ extern "C"
  *
  *    AAU_CONFIG      uint32BE timestamp (always 0)
  *                    uint8    profileLength
- *                    byte[profileLength] profile   "arf-body-v1" | "arf-face-v1",
- *                                                   no length-prefix beyond the
- *                                                   one byte above, no NUL
+ *                    byte[profileLength] profile   "arf-body-v1" | "arf-face-v1" |
+ *                                                   "arf-landmark-v1", no length-prefix
+ *                                                   beyond the one byte above, no NUL
  *                    float32BE timescale           ticks per second == fps
  *
  *    AAU_JOINT       uint32BE timestampTicks       == frame index
@@ -238,6 +245,35 @@ extern "C"
 #define ARF_AAU_LANDMARK    3
 
 #define ARF_AAU_HEADER_BYTES 5  /* packed (type<<1)|reserved byte + uint32BE unitLength */
+
+/* ---------------------------------------------------------------------------
+ *  BlendshapeSet.shapes -- one GLB per target (writer/reader: arf_glb.c)
+ * ---------------------------------------------------------------------------
+ *  Per spec, each shapes[i] is a GLB file with only geometry (vertices and
+ *  faces, no materials/textures) -- see arf_glb.h.  Critically, a shape's
+ *  POSITION accessor is the target's *absolute* deformed vertex positions,
+ *  not a delta: the blend formula in the spec is
+ *
+ *      v_out = v_0 + sum_i( w_i * (v_i - v_0) )
+ *
+ *  i.e. v_i (what the GLB stores) minus v_0 (the base mesh) is the delta,
+ *  computed at blend time, not stored. This library's runtime keeps deltas
+ *  internally regardless (arfBlendshapes.deltas, the same representation
+ *  arfApplyBlendshapes() has always used) -- the absolute/delta conversion
+ *  happens only at the read/write boundary: the reader subtracts the base
+ *  mesh once at load time, the writer adds it back once per shape at save
+ *  time. A shape's topology (vertex and triangle count, and this library
+ *  additionally checks the indices themselves) must match components.
+ *  meshes[0] exactly, per spec ("the topology of the baseMesh and the
+ *  associated shapes shall be identical").
+ *
+ *  This round trip is not bit-exact: (base + delta) - base can differ from
+ *  delta by a float32 ULP or so at the base mesh's coordinate magnitude
+ *  (centimetres, order 10^2), which can be a meaningfully large fraction of
+ *  a fine facial delta (order 10^-2 or smaller). This is a real, if usually
+ *  small, precision cost of the spec's absolute-position storage, not a bug
+ *  to route around.
+ * -------------------------------------------------------------------------*/
 
 /* ---------------------------------------------------------------------------
  *  TextureSet / TextureTarget

@@ -24,13 +24,12 @@ and C++ bindings that wrap the same C API without copying anything.
 
 `arf.json`'s component graph — numeric ids resolved by matching value, not
 array position; `structure` as Asset/LOD; `LandmarkSet`;
-`TextureSet`/`TextureTarget` — and the AAU animation-stream bitstream (field
-widths, big-endian byte order, `AAU_LANDMARK`) have been checked against the
-FDIS-stage text of ISO/IEC 23090-39 and match it. Still this project's own
-convention rather than verified spec values:
-
-* the sparse skin-weight tensor (the spec only defines a dense one),
-* raw dense tensors in place of embedded GLB blendshape targets.
+`TextureSet`/`TextureTarget`; `BlendshapeSet.shapes` as per-shape GLB
+targets — and the AAU animation-stream bitstream (field widths, big-endian
+byte order, `AAU_LANDMARK`) have been checked against the FDIS-stage text of
+ISO/IEC 23090-39 and match it. Still this project's own convention: the
+sparse skin-weight tensor (the spec only defines a dense one) — a
+deliberate, documented choice, not an oversight.
 
 Everything this library assumes about the bytes is written down in one place,
 [`src/libarf/arf_format.h`](src/libarf/arf_format.h), so there is a single file
@@ -347,6 +346,7 @@ python3 tools/mutate_arf.py samples/summerlove_0.arfz ./build/arfplay
 src/libarf/        the C core: arf.h is the whole public API
   arf_format.h       the on-the-wire byte layouts, the one file to diff on drift
   arf_json.{c,h}     a small recursive-descent JSON reader
+  arf_glb.{c,h}      a minimal binary glTF (GLB) encoder/decoder, for blendshape targets
   arf_bytes.h        bounds-checked little-endian cursor and output buffer
   arf_reader.c       ZIP, JSON schema walk, tensors, AAU decoding
   arf_writer.c       tensor and AAU encoding, arf.json emit, ZIP assembly

@@ -17,14 +17,14 @@ stops loading.
 
 ARF is ISO/IEC 23090-39 (MPEG-I Part 39). `libarf`'s `arf.json` component
 graph — numeric ids resolved by matching value, not array position;
-`structure` as Asset/LOD; `LandmarkSet`; `TextureSet`/`TextureTarget` — and
-the AAU animation-stream bitstream (field widths, big-endian byte order,
-`AAU_LANDMARK`) have been checked against the FDIS-stage text and match it;
-see [`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting
-of what was changed and why. Still outstanding, and still this project's own
-convention rather than verified spec values: the sparse skin-weight tensor
-(the spec only defines a dense one), and `BlendshapeSet.shapes` as one
-combined raw delta tensor rather than per-shape embedded GLB targets.
+`structure` as Asset/LOD; `LandmarkSet`; `TextureSet`/`TextureTarget`;
+`BlendshapeSet.shapes` as per-shape GLB targets — and the AAU animation-stream
+bitstream (field widths, big-endian byte order, `AAU_LANDMARK`) have been
+checked against the FDIS-stage text and match it; see
+[`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting of
+what was changed and why. Still outstanding, and still this project's own
+convention: the sparse skin-weight tensor (the spec only defines a dense
+one) — a deliberate, documented choice, not an oversight.
 
 This container format traces back to
 [SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)'s `ARFWriter`,
@@ -65,7 +65,7 @@ ISOBMFF/MPEG-2 Systems use, where it means big-endian — see
 │   ├── mesh_indices.bin        dense  [n_tris, 3]             uint32
 │   ├── skin_weights.bin        sparse dims [n_verts, n_joints]
 │   ├── inv_bind_pose.bin       dense  [n_joints, 16]          float32
-│   ├── face_blendshapes.bin    dense  [n_shapes, n_verts, 3]  float32   (optional)
+│   ├── face_blendshape_<i>.glb GLB, one per blendshape target          (optional)
 │   ├── landmark_vertices.bin   dense  [n_landmarks]           uint32   (optional)
 │   ├── texture_material.bin    opaque image bytes                     (optional)
 │   └── texture_target_<i>.bin  opaque image bytes, one per target     (optional)
@@ -82,6 +82,18 @@ their `data[].type` is a real image MIME type (e.g. `image/png`), and
 them meaning. There is no `animations/textures.bin` — `TextureSet` has no
 AAU counterpart (see "Avatar Animation Units" below), so it is a static
 asset reference, not an animated track.
+
+Each `face_blendshape_<i>.glb` is a minimal, standalone, spec-valid binary
+glTF: one mesh, one primitive, a `POSITION` accessor and an indices
+accessor, no materials or textures (`arf_glb.c` is the whole encoder/
+decoder — a self-contained ~250 lines, not a general-purpose glTF library).
+Critically, the stored positions are **absolute**, matching the same base
+mesh topology as `components.meshes[0]` vertex for vertex and triangle for
+triangle — not a pre-computed delta. `libarf`'s runtime still works
+internally in deltas (`arfApplyBlendshapes()` is unchanged); the conversion
+happens only at the read/write boundary — see the `BlendshapeSet.shapes`
+note below `arf.json`'s shape for why, and the float32-precision cost of
+that conversion.
 
 One container is one tracked person. For a pipeline-produced container the
 numbers are `n_verts` 18439, `n_tris` 36874, `n_joints` 127, sparse skin
@@ -142,7 +154,7 @@ components.meshes:    [ { id: 0, name: "mesh0", path: <path>,
                           data: [<positions data id>, <indices data id>] } ]
 
 components.blendshapeSets: [ { id: 0, name: "face_expression", baseMesh: <mesh id>,
-                               shapes: [<data id>] } ]  // optional
+                               shapes: [<data id>, <data id>, ...] } ]  // optional, one id per shape
 
 components.landmarkSets: [ { id: 0, name: "landmarks", baseMesh: <mesh id>,
                              vertices: <data id> } ]  // optional
@@ -157,11 +169,31 @@ data: [ { id: <number>, name: <string>, uri, type, byteLength } ]
 
 `type` is `application/mpeg.arf.dense` or `application/mpeg.arf.sparse` for
 tensors (the sparse one is this project's own extension — see "Sparse
-tensor" below), or a real image MIME type (e.g. `application/mpeg.arf.dense`
-does not apply) for `TextureSet` material/target entries, which are opaque
-image bytes, not tensors. Component references such as a `weights` or
-`inverseBindMatrix` field are numbers that resolve against `data[].id`, and
-the entry's `uri` names the ZIP entry.
+tensor" below), `model/gltf-binary` for each `BlendshapeSet.shapes` entry
+(a GLB, not a tensor — see below), or a real image MIME type for `TextureSet`
+material/target entries (opaque image bytes, not tensors either). Component
+references such as a `weights` or `inverseBindMatrix` field are numbers
+that resolve against `data[].id`, and the entry's `uri` names the ZIP entry.
+
+**`BlendshapeSet.shapes`**: each entry is one `data[]` id naming one GLB file
+(`face_blendshape_<i>.glb`), one per blendshape target — not the single
+combined delta tensor this library used before this milestone. Each GLB's
+`POSITION` accessor holds that shape's **absolute** deformed vertex
+positions, matching the base mesh's topology vertex for vertex and triangle
+for triangle (the spec: "the topology of the baseMesh and the associated
+shapes shall be identical"); the blend formula in the spec, `v_out = v_0 +
+sum_i(w_i * (v_i - v_0))`, computes the delta at blend time from that
+absolute position, it is not stored pre-computed. `libarf`'s runtime still
+works in deltas internally (`arfApplyBlendshapes()` is unchanged) — the
+absolute/delta conversion happens only at the read/write boundary, in
+`arf_reader.c`/`arf_writer.c`, using the minimal glTF-binary (GLB) encoder/
+decoder in `arf_glb.c` (a self-contained ~250 lines: one mesh, one
+primitive, a `POSITION` accessor and an indices accessor, no materials or
+textures — not a general-purpose glTF library). That conversion is not
+bit-exact: `(base + delta) - base` can differ from `delta` by a float32 ULP
+or so at the base mesh's coordinate magnitude (centimetres), which can be a
+meaningfully large fraction of a fine facial delta — a real, usually small,
+precision cost of the spec's absolute-position storage, not a bug.
 
 `TextureSet` has no `baseMesh`/mesh field of its own; `skins[0].textureSet`
 is the only link tying it to anything, so it is emitted (unlike

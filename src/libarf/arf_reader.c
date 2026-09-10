@@ -14,6 +14,7 @@
 
 #include "arf.h"
 #include "arf_bytes.h"
+#include "arf_glb.h"
 #include "arf_json.h"
 #include "arf_internal.h"
 
@@ -757,44 +758,73 @@ static int arfLoadSkin(struct arfAvatar *avatar, zip_t *archive,
  *  references; this library still writes/reads its own single combined
  *  dense delta tensor as shapes[0] -- see doc/CONFORMANCE_GAPS.md, GLB
  *  targets are a later milestone, not this one. */
+/** @brief Load every blendshape target GLB and convert its absolute
+ *  positions back to the delta form this library's runtime uses -- see the
+ *  BlendshapeSet.shapes note in arf_format.h for why the on-the-wire and
+ *  in-memory representations differ. */
 static int arfLoadBlendshapes(struct arfAvatar *avatar, zip_t *archive,
                               const struct arfJsonValue *set, const struct arfJsonValue *dataArray)
 {
-    int deltasId = (int) arfJsonNumber(arfJsonAt(arfJsonMember(set,"shapes"),0),-1.0);
-    const char *deltasURI = arfResolveDataURI(dataArray,deltasId);
-    if (deltasURI==0) { arfSetError("blendshapeSet.shapes[0] (data id %d) does not resolve to a data item",deltasId); return 0; }
+    const struct arfJsonValue *shapes = arfJsonMember(set,"shapes");
+    unsigned int shapeCount = arfJsonCount(shapes);
+    unsigned int vertexCount = avatar->mesh.numberOfVertices;
 
-    size_t size  = 0;
-    void  *bytes = arfExtractEntry(archive,deltasURI,&size);
-    if (bytes==0) { return 0; }
+    if (shapeCount==0) { arfSetError("blendshapeSet.shapes is empty or missing"); return 0; }
 
-    struct arfCursor      cursor;
-    struct arfDenseTensor tensor;
-    arfCursorInit(&cursor,bytes,size);
+    avatar->blendshapes.deltas = (float *) malloc((size_t) shapeCount * vertexCount * 3 * sizeof(float));
+    if (avatar->blendshapes.deltas==0) { arfSetError("out of memory allocating %u blendshape targets",shapeCount); return 0; }
 
-    if (!arfReadDenseHeader(&cursor,&tensor,"blendshape deltas")) { free(bytes); return 0; }
+    avatar->blendshapes.numberOfShapes   = shapeCount;
+    avatar->blendshapes.numberOfVertices = vertexCount;
 
-    if ( (tensor.numberOfDimensions!=3) || (tensor.dims[2]!=3) || (tensor.dtype!=ARF_COMPONENT_FLOAT) ||
-         ((unsigned int) tensor.dims[1] != avatar->mesh.numberOfVertices) )
+    for (unsigned int s=0; s<shapeCount; s++)
     {
-        arfSetError("blendshape deltas must be a float [shapes,%u,3] tensor",avatar->mesh.numberOfVertices);
+        int shapeId = (int) arfJsonNumber(arfJsonAt(shapes,s),-1.0);
+        const char *shapeURI = arfResolveDataURI(dataArray,shapeId);
+        if (shapeURI==0) { arfSetError("blendshapeSet.shapes[%u] (data id %d) does not resolve to a data item",s,shapeId); return 0; }
+
+        size_t size  = 0;
+        void  *bytes = arfExtractEntry(archive,shapeURI,&size);
+        if (bytes==0) { return 0; }
+
+        char what[64];
+        snprintf(what,sizeof(what),"blendshape %u",s);
+
+        float        *shapePositions      = 0;
+        unsigned int  shapeVertexCount    = 0;
+        unsigned int *shapeIndices        = 0;
+        unsigned int  shapeTriangleCount  = 0;
+
+        int ok = arfGlbReadMesh(bytes,size,what,&shapePositions,&shapeVertexCount,&shapeIndices,&shapeTriangleCount);
         free(bytes);
-        return 0;
+        if (!ok) { return 0; }
+
+        if ( (shapeVertexCount != vertexCount) || (shapeTriangleCount != avatar->mesh.numberOfTriangles) )
+        {
+            arfSetError("blendshape %u has %u vertices/%u triangles, the base mesh has %u/%u -- "
+                        "the spec requires identical topology",
+                        s,shapeVertexCount,shapeTriangleCount,vertexCount,avatar->mesh.numberOfTriangles);
+            free(shapePositions);
+            free(shapeIndices);
+            return 0;
+        }
+
+        if (memcmp(shapeIndices,avatar->mesh.indices,(size_t) avatar->mesh.numberOfTriangles * 3 * sizeof(unsigned int)) != 0)
+        {
+            arfSetError("blendshape %u's triangle indices do not match the base mesh -- "
+                        "the spec requires identical topology",s);
+            free(shapePositions);
+            free(shapeIndices);
+            return 0;
+        }
+
+        float *delta = avatar->blendshapes.deltas + (size_t) s * vertexCount * 3;
+        for (size_t i=0; i<(size_t) vertexCount * 3; i++) { delta[i] = shapePositions[i] - avatar->mesh.positions[i]; }
+
+        free(shapePositions);
+        free(shapeIndices);
     }
 
-    avatar->blendshapes.numberOfShapes   = (unsigned int) tensor.dims[0];
-    avatar->blendshapes.numberOfVertices = (unsigned int) tensor.dims[1];
-    avatar->blendshapes.deltas = (float *) malloc(arfDenseElementCount(&tensor) * sizeof(float));
-
-    if ( (avatar->blendshapes.deltas==0) ||
-         (!arfCursorReadFloats(&cursor,avatar->blendshapes.deltas,arfDenseElementCount(&tensor))) )
-    {
-        arfSetError("blendshape delta payload is truncated");
-        free(bytes);
-        return 0;
-    }
-
-    free(bytes);
     return 1;
 }
 

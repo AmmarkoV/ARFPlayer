@@ -13,6 +13,7 @@
 
 #include "arf.h"
 #include "arf_bytes.h"
+#include "arf_glb.h"
 #include "arf_internal.h"
 
 #include <zip.h>
@@ -20,6 +21,47 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/** @brief data[].id for every item this avatar writes, decided once up
+ *  front in arfSave() so the binary encoders and arfWriteJson() agree.
+ *  mesh_positions/indices/skin_weights/inverseBind are always exactly one
+ *  instance each, in this fixed order, so they stay compile-time constants
+ *  (ARF_DATA_ID_MESH_POSITIONS etc. no longer exist -- 0/1/2/3 below are the
+ *  same values, just no longer given names, since nothing past them is fixed
+ *  any more). Everything after them is a running count: blendshape shapes
+ *  and texture targets are both variable in count, so no fixed id scheme
+ *  covers them. -1 means "not present". */
+struct arfDataIdPlan
+{
+    int faceShapeFirst;      /* shapes[i] = faceShapeFirst + i */
+    int landmarkVertices;
+    int textureMaterial;
+    int textureTargetFirst;  /* targets[i] = textureTargetFirst + i */
+};
+
+static struct arfDataIdPlan arfPlanDataIds(const struct arfAvatar *avatar)
+{
+    struct arfDataIdPlan plan = { -1, -1, -1, -1 };
+    int next = 4;  /* after mesh_positions=0, mesh_indices=1, skin_weights=2, inverseBind=3 */
+
+    if (avatar->hasFace)
+    {
+        plan.faceShapeFirst = next;
+        next += (int) avatar->blendshapes.numberOfShapes;
+    }
+    if (avatar->hasLandmarks)
+    {
+        plan.landmarkVertices = next++;
+    }
+    if (avatar->hasTextureSet)
+    {
+        plan.textureMaterial = next++;
+        plan.textureTargetFirst = next;
+        next += (int) avatar->textureSet.numberOfTargets;
+    }
+
+    return plan;
+}
 
 
 /* ===========================================================================
@@ -572,11 +614,13 @@ static void arfJsonDataItem(struct arfBuffer *buffer, int id, const char *name, 
  *
  *  Every component's numeric id is its index within its own
  *  components.<array> -- this library only ever holds one mesh/skin/
- *  skeleton/blendshapeSet, so those always get id 0.  data[] ids are defined
- *  in arf_format.h (ARF_DATA_ID_*). */
+ *  skeleton, so those always get id 0.  data[] ids for mesh/skin/skeleton
+ *  data are the fixed ARF_DATA_ID_* constants; everything after them comes
+ *  from `plan`, computed once in arfSave() -- see struct arfDataIdPlan. */
 static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avatar,
+                         const struct arfDataIdPlan *plan,
                          size_t positionsBytes, size_t indicesBytes, size_t weightsBytes,
-                         size_t inverseBindBytes, size_t deltaBytes, size_t landmarkVerticesBytes)
+                         size_t inverseBindBytes, const size_t *shapeBytes, size_t landmarkVerticesBytes)
 {
     arfJsonText(buffer,"{\n");
 
@@ -682,7 +726,11 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
     {
         arfJsonText(buffer,",\n    \"blendshapeSets\": [{\"id\": 0, \"name\": \"" ARF_BLENDSHAPE_SET_ID
                            "\", \"baseMesh\": 0, \"shapes\": [");
-        arfJsonUnsigned(buffer,ARF_DATA_ID_FACE_DELTAS);
+        for (unsigned int s=0; s<avatar->blendshapes.numberOfShapes; s++)
+        {
+            if (s>0) { arfJsonText(buffer,", "); }
+            arfJsonUnsigned(buffer,(unsigned int) (plan->faceShapeFirst + (int) s));
+        }
         arfJsonText(buffer,"]}]");
     }
 
@@ -690,7 +738,7 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
     {
         arfJsonText(buffer,",\n    \"landmarkSets\": [{\"id\": 0, \"name\": \"" ARF_LANDMARK_SET_ID
                            "\", \"baseMesh\": 0, \"vertices\": ");
-        arfJsonUnsigned(buffer,ARF_DATA_ID_LANDMARK_VERTICES);
+        arfJsonUnsigned(buffer,(unsigned int) plan->landmarkVertices);
         arfJsonText(buffer,"}]");
     }
 
@@ -704,7 +752,7 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
         arfJsonText(buffer,",\n    \"textureSets\": [{\"id\": 0, \"name\": ");
         arfJsonQuoted(buffer,avatar->textureSet.name);
         arfJsonText(buffer,", \"animationInfo\": [], \"material\": ");
-        arfJsonUnsigned(buffer,ARF_DATA_ID_TEXTURE_MATERIAL);
+        arfJsonUnsigned(buffer,(unsigned int) plan->textureMaterial);
         arfJsonText(buffer,", \"materialPath\": \"\", \"targets\": [");
 
         for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
@@ -715,7 +763,7 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
             arfJsonText(buffer,", \"name\": ");
             arfJsonQuoted(buffer,avatar->textureSet.targets[t].name);
             arfJsonText(buffer,", \"texture\": ");
-            arfJsonUnsigned(buffer,ARF_DATA_ID_TEXTURE_TARGET_FIRST + t);
+            arfJsonUnsigned(buffer,(unsigned int) (plan->textureTargetFirst + (int) t));
             arfJsonText(buffer,", \"texturePath\": \"\"}");
         }
 
@@ -739,13 +787,21 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
 
     if (avatar->hasFace)
     {
-        arfJsonDataItem(buffer,ARF_DATA_ID_FACE_DELTAS,ARF_ID_FACE_DELTAS,ARF_ENTRY_FACE_DELTAS,ARF_MIME_DENSE,
-                        deltaBytes,lastIsFace);
+        char name[ARF_MAX_NAME + 32];
+        char entry[64];
+
+        for (unsigned int s=0; s<avatar->blendshapes.numberOfShapes; s++)
+        {
+            snprintf(name,sizeof(name),ARF_ID_FACE_SHAPE_FORMAT,s);
+            snprintf(entry,sizeof(entry),ARF_ENTRY_FACE_SHAPE_FORMAT,s);
+            arfJsonDataItem(buffer,plan->faceShapeFirst + (int) s,name,entry,ARF_MIME_GLB,shapeBytes[s],
+                            lastIsFace && (s+1==avatar->blendshapes.numberOfShapes));
+        }
     }
 
     if (avatar->hasLandmarks)
     {
-        arfJsonDataItem(buffer,ARF_DATA_ID_LANDMARK_VERTICES,ARF_ID_LANDMARK_VERTICES,ARF_ENTRY_LANDMARK_VERTICES,
+        arfJsonDataItem(buffer,plan->landmarkVertices,ARF_ID_LANDMARK_VERTICES,ARF_ENTRY_LANDMARK_VERTICES,
                         ARF_MIME_DENSE,landmarkVerticesBytes,lastIsLandmark);
     }
 
@@ -754,14 +810,14 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
         char name[ARF_MAX_NAME + 32];
         char entry[64];
 
-        arfJsonDataItem(buffer,ARF_DATA_ID_TEXTURE_MATERIAL,ARF_ID_TEXTURE_MATERIAL,ARF_ENTRY_TEXTURE_MATERIAL,
+        arfJsonDataItem(buffer,plan->textureMaterial,ARF_ID_TEXTURE_MATERIAL,ARF_ENTRY_TEXTURE_MATERIAL,
                         avatar->textureSet.materialMimeType,avatar->textureSet.materialLength,0);
 
         for (unsigned int t=0; t<avatar->textureSet.numberOfTargets; t++)
         {
             snprintf(name,sizeof(name),ARF_ID_TEXTURE_TARGET_FORMAT,t);
             snprintf(entry,sizeof(entry),ARF_ENTRY_TEXTURE_TARGET_FORMAT,t);
-            arfJsonDataItem(buffer,ARF_DATA_ID_TEXTURE_TARGET_FIRST + t,name,entry,
+            arfJsonDataItem(buffer,plan->textureTargetFirst + (int) t,name,entry,
                             avatar->textureSet.targets[t].mimeType,avatar->textureSet.targets[t].length,
                             (t+1==avatar->textureSet.numberOfTargets));
         }
@@ -886,19 +942,25 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
     if ( (avatar==0) || (filename==0) )    { arfSetError("no avatar or filename was given"); return ARF_ERROR_ARGUMENT; }
     if (avatar->numberOfFrames==0)         { arfSetError("refusing to write a container with no animation frames"); return ARF_ERROR_ARGUMENT; }
 
-    struct arfBuffer positions, indices, weights, inverseBind, deltas, landmarkVertices,
+    struct arfBuffer positions, indices, weights, inverseBind, landmarkVertices,
                      jointStream, faceStream, landmarkStream, json, idMap;
     arfBufferInit(&positions);
     arfBufferInit(&indices);
     arfBufferInit(&weights);
     arfBufferInit(&inverseBind);
-    arfBufferInit(&deltas);
     arfBufferInit(&landmarkVertices);
     arfBufferInit(&jointStream);
     arfBufferInit(&faceStream);
     arfBufferInit(&landmarkStream);
     arfBufferInit(&json);
     arfBufferInit(&idMap);
+
+    /* One GLB per blendshape target -- allocated only if avatar->hasFace,
+     * freed unconditionally below (arfBufferFree on a still-zeroed buffer is
+     * a no-op). shapeBytes is handed to arfWriteJson() for each shape's
+     * byteLength. */
+    struct arfBuffer *shapes = 0;
+    size_t           *shapeBytes = 0;
 
     int    result  = ARF_ERROR_IO;
     zip_t *archive = 0;
@@ -922,9 +984,36 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
 
     if (avatar->hasFace)
     {
-        int deltaDims[3] = { (int) avatar->blendshapes.numberOfShapes,
-                             (int) avatar->blendshapes.numberOfVertices, 3 };
-        arfWriteDenseFloats(&deltas,deltaDims,3,avatar->blendshapes.deltas);
+        unsigned int shapeCount   = avatar->blendshapes.numberOfShapes;
+        unsigned int vertexCount  = avatar->mesh.numberOfVertices;
+
+        shapes     = (struct arfBuffer *) calloc(shapeCount,sizeof(struct arfBuffer));
+        shapeBytes = (size_t *)           calloc(shapeCount,sizeof(size_t));
+        float *shapePositions = (float *) malloc((size_t) vertexCount * 3 * sizeof(float));
+
+        if ( (shapes==0) || (shapeBytes==0) || (shapePositions==0) )
+        {
+            arfSetError("out of memory encoding %u blendshape targets",shapeCount);
+            free(shapePositions);
+            goto cleanup;
+        }
+
+        for (unsigned int s=0; s<shapeCount; s++)
+        {
+            arfBufferInit(&shapes[s]);
+
+            /* The spec's shape keys are absolute positions, not deltas -- the
+             * blend formula computes v_i - v_0 at blend time -- so the base
+             * mesh is added back here; the reader subtracts it again once at
+             * load time.  See the BlendshapeSet.shapes note in arf_format.h. */
+            const float *delta = avatar->blendshapes.deltas + (size_t) s * vertexCount * 3;
+            for (size_t i=0; i<(size_t) vertexCount * 3; i++) { shapePositions[i] = avatar->mesh.positions[i] + delta[i]; }
+
+            arfGlbWriteMesh(&shapes[s],shapePositions,vertexCount,avatar->mesh.indices,avatar->mesh.numberOfTriangles);
+            shapeBytes[s] = shapes[s].length;
+        }
+
+        free(shapePositions);
         arfWriteFaceStream(&faceStream,avatar,0);
     }
 
@@ -936,8 +1025,10 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
         arfWriteLandmarkStream(&landmarkStream,avatar,0);
     }
 
-    arfWriteJson(&json,avatar,positions.length,indices.length,weights.length,inverseBind.length,
-                deltas.length,landmarkVertices.length);
+    struct arfDataIdPlan plan = arfPlanDataIds(avatar);
+
+    arfWriteJson(&json,avatar,&plan,positions.length,indices.length,weights.length,inverseBind.length,
+                shapeBytes,landmarkVertices.length);
     arfWriteIdMap(&idMap,avatar);
 
     int openError = 0;
@@ -961,7 +1052,12 @@ int arfSave(const struct arfAvatar *avatar, const char *filename)
 
     if (avatar->hasFace)
     {
-        if (!arfAddEntry(archive,ARF_ENTRY_FACE_DELTAS,&deltas))     { goto cleanup; }
+        for (unsigned int s=0; s<avatar->blendshapes.numberOfShapes; s++)
+        {
+            char entry[64];
+            snprintf(entry,sizeof(entry),ARF_ENTRY_FACE_SHAPE_FORMAT,s);
+            if (!arfAddEntry(archive,entry,&shapes[s])) { goto cleanup; }
+        }
         if (!arfAddEntry(archive,ARF_ENTRY_FACE_STREAM,&faceStream)) { goto cleanup; }
     }
 
@@ -1011,7 +1107,12 @@ cleanup:
     arfBufferFree(&indices);
     arfBufferFree(&weights);
     arfBufferFree(&inverseBind);
-    arfBufferFree(&deltas);
+    if (shapes!=0)
+    {
+        for (unsigned int s=0; s<avatar->blendshapes.numberOfShapes; s++) { arfBufferFree(&shapes[s]); }
+        free(shapes);
+    }
+    free(shapeBytes);
     arfBufferFree(&landmarkVertices);
     arfBufferFree(&jointStream);
     arfBufferFree(&faceStream);
