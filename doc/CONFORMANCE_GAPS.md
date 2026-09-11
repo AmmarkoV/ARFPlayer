@@ -229,11 +229,43 @@ annex schema looks like it fell out of sync with the prose. Worth a short
 issue against the spec itself once conformance work starts in earnest, the
 same way `doc/UPSTREAM_ISSUE.md` is a short issue against SAM3DBody-cpp.
 
+**This turns out to be a systemic pattern, not a one-off.** A second read
+through the annex schema against the prose tables for every other component
+type turns up the same two flavors of drift recurring elsewhere:
+
+- `id` is missing from the annex schema's `properties` entirely (not merely
+  absent from `required` — a strict-mode validator would reject it as an
+  unrecognized property) for `Node`, `Skeleton`, `Skin`, and `Data`, while
+  the prose marks `id` Mandatory for all four. `Mesh`, `BlendshapeSet`,
+  `LandmarkSet`, `TextureSet`, and `TextureTarget` don't have this problem —
+  their annex schemas do list `id` — so it's specifically these four that
+  seem to have fallen out of sync.
+- `Skin.mapping`/`Skin.skeleton`/`Skin.weights` and `Mesh.path` are listed
+  as required by the annex schema but Optional in the prose's Use column —
+  the same required-vs-optional flip as the `Node.transform` case above,
+  just in the other direction (schema stricter than prose instead of
+  looser).
+
+None of this affects interop with this project's own containers: `libarf`'s
+writer already emits `id` unconditionally on every `Node`/`Skeleton`/
+`Skin`/`Data` object, and always writes `Skin.mapping`/`skeleton`/`weights`
+and `Mesh.path` — a strict superset that satisfies both readings at once
+(`arf_writer.c`, `arfJsonDataItem`). The one place it could theoretically
+bite is `libarf`'s own reader: `arfResolveDataURI`/`arfResolveDataType`
+(`arf_reader.c`) resolve a referenced item by matching its `id` field, so a
+hypothetical third-party container validated only against the literal annex
+schema — which never requires `id` on these four types — and written
+without one would fail to load here. Low-severity/hypothetical, since the
+prose (the authoritative narrative text) requires `id` everywhere
+regardless, and no real-world writer is likely to omit it. Worth folding
+into the same upstream issue as the `Node.transform` note above rather than
+filing separately.
+
 ## `Skeleton` `[done]`
 
 | field | status |
 |---|---|
-| `id`, `name` | done |
+| `id`, `name` | done — `id` mandatory per prose but missing from the annex schema's `properties`, see the upstream-inconsistency note under `Node` above |
 | `root` | done; numeric `Node` id, checked against the parentless node |
 | `joints` | done; array of `Node` ids, checked to be `[0, 1, 2, ...]` in node order |
 | `inverseBindMatrix` | done, singular field, one data reference for the whole `Nx16` dense tensor |
@@ -246,11 +278,11 @@ together, per spec, rather than a thin name-matching shim:
 
 | field | status |
 |---|---|
-| `id`, `name` | done |
-| `mapping` | done, as an honest placeholder (same caveat as `Node.mapping`) |
-| `skeleton`, `mesh` | done — numeric ids, cross-checked to be `0` at load time (this library only ever holds one of each) |
+| `id`, `name` | done — `id` mandatory per prose but missing from the annex schema's `properties`, see the upstream-inconsistency note under `Node` above |
+| `mapping` | done, as an honest placeholder (same caveat as `Node.mapping`); also listed Optional in the prose but required by the annex schema, same note |
+| `skeleton`, `mesh` | done — numeric ids, cross-checked to be `0` at load time (this library only ever holds one of each); also Optional-per-prose/required-per-schema |
 | `blendshapeSet`, `landmarkSet`, `textureSet` | not added — optional in the spec, and `BlendshapeSet.baseMesh` already links the mesh to its blendshape set independently, so nothing currently needs these |
-| `weights` | done as a numeric reference; **still the sparse tensor**, see [Tensor format](#tensor-format-no-sparse-in-the-spec) below |
+| `weights` | done as a numeric reference; **still the sparse tensor**, see [Tensor format](#tensor-format-no-sparse-in-the-spec) below; also Optional-per-prose/required-per-schema, see the upstream-inconsistency note under `Node` above |
 | `proprietaryAnimations` | not added, optional, out of scope |
 
 ## `Mesh` `[done]`
@@ -258,7 +290,7 @@ together, per spec, rather than a thin name-matching shim:
 | field | status |
 |---|---|
 | `id`, `name` | done |
-| `path` | done, as an honest placeholder (same caveat as `Node.mapping`) |
+| `path` | done, as an honest placeholder (same caveat as `Node.mapping`); listed Optional in the prose but required by the annex schema — see the upstream-inconsistency note under `Node` above |
 | `data` | done as `[positions data id, indices data id]` — this project's own documented convention (`arf_format.h`), since the spec text available here doesn't prescribe the slot order beyond "mesh data" |
 
 ## `BlendshapeSet` `[done]`
@@ -429,7 +461,7 @@ without `libarf` ever parsing PNG.
 
 | field | status |
 |---|---|
-| `id` | done — numeric, this project's own sequential convention (`ARF_DATA_ID_*` in `arf_format.h`) |
+| `id` | done — numeric, this project's own sequential convention (`ARF_DATA_ID_*` in `arf_format.h`); mandatory per prose but missing from the annex schema's `properties`, see the upstream-inconsistency note under `Node` above |
 | `name`, `uri`, `byteLength` | done, unchanged in shape |
 | `type` | done — renamed from the old `mimeType` |
 | MIME values | unchanged: `application/mpeg.arf.dense` / `application/mpeg.arf.sparse` (the second one is invented, see below). Spec only defines `application/mpeg.arf.dense`. |
