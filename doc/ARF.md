@@ -18,13 +18,16 @@ stops loading.
 ARF is ISO/IEC 23090-39 (MPEG-I Part 39). `libarf`'s `arf.json` component
 graph — numeric ids resolved by matching value, not array position;
 `structure` as Asset/LOD; `LandmarkSet`; `TextureSet`/`TextureTarget`;
-`BlendshapeSet.shapes` as per-shape GLB targets — and the AAU animation-stream
-bitstream (field widths, big-endian byte order, `AAU_LANDMARK`) have been
-checked against the FDIS-stage text and match it; see
-[`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting of
-what was changed and why. Still outstanding, and still this project's own
+`BlendshapeSet.shapes` as per-shape GLB targets; `Metadata.age`/`gender`;
+`preamble.supportedAnimations` as the schema's object shape rather than a
+flat array — and the AAU animation-stream bitstream (field widths,
+big-endian byte order, `AAU_LANDMARK`) have been checked against the
+spec text currently published at the MPEG ARF project site and match it;
+see [`doc/CONFORMANCE_GAPS.md`](CONFORMANCE_GAPS.md) for the full accounting
+of what was changed and why. Still outstanding, and still this project's own
 convention: the sparse skin-weight tensor (the spec only defines a dense
-one) — a deliberate, documented choice, not an oversight.
+one), and centimetres as the unit (the spec names the metre as its default)
+— both deliberate, documented choices, not oversights.
 
 This container format traces back to
 [SAM3DBody-cpp](https://github.com/AmmarkoV/SAM3DBody-cpp)'s `ARFWriter`,
@@ -121,9 +124,19 @@ own human-readable `name` string alongside its numeric `id`.
 
 ```
 preamble:  { signature: "ARF", version: "1.0",
-             supportedAnimations: ["arf-body-v1", ("arf-face-v1"), ("arf-landmark-v1")] }
+             supportedAnimations: { bodyAnimations: ["arf-body-v1"],
+                                    (faceAnimations: ["arf-face-v1"]),
+                                    (landmarkAnimations: ["arf-landmark-v1"]) } }
+// supportedAnimations is an object keyed by modality, not a flat array --
+// this library's own arf-*-v1 profile names (the same ones AAU_CONFIG
+// carries) fill each one-entry array; the spec suggests each entry "should"
+// be a URN, but doesn't define a concrete scheme, so this library keeps its
+// plain profile names rather than fabricate one.
 
-metadata:  { name: <string>, id: <string> }
+metadata:  { name: <string>, id: <string>, age: <integer>, gender: <string> }
+// age/gender are mandatory per the Metadata schema; this library has no real
+// source for either (no producing-pipeline field carries them), so they are
+// honest placeholders: age -1 ("unknown"), gender "unspecified".
 
 structure.assets: [
   { name: "body", isMain: true,
@@ -353,8 +366,14 @@ failure.
 3. **Skinning is standard LBS**: compose per-frame joint globals down the
    hierarchy from the AAU locals, multiply each by its inverse bind matrix,
    and blend by the sparse weights over `mesh_positions`.
-4. **Units are centimetres.** The root joint's translation is the tracker's
-   camera-frame world position; every other joint's is parent-relative.
+4. **Units are centimetres** -- a documented, deliberate deviation from the
+   General Conventions clause, which names the metre as ARF's default unit.
+   Inherited unchanged from the original SAM3DBody-flavoured design, and
+   nothing downstream (including the producing pipeline's own tracker output)
+   is in metres, so this stays as-is rather than converting at the read/write
+   boundary; see `doc/CONFORMANCE_GAPS.md`. The root joint's translation is
+   the tracker's camera-frame world position; every other joint's is
+   parent-relative.
 5. **Quaternions are XYZW**, not WXYZ.
 6. **+Y is up, the avatar sits at positive Z, and it faces +Z.** The first two
    follow from the camera-space framing; the third does not, and is worth

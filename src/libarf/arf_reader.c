@@ -1339,6 +1339,8 @@ struct arfAvatar *arfLoadFromMemory(const void *bytes, size_t length)
 
     snprintf(avatar->name,sizeof(avatar->name),"%s",arfJsonString(arfJsonMember(metadata,"name"),"avatar"));
     snprintf(avatar->id,sizeof(avatar->id),"%s",arfJsonString(arfJsonMember(metadata,"id"),"0"));
+    avatar->age = (int) arfJsonNumber(arfJsonMember(metadata,"age"),-1);
+    snprintf(avatar->gender,sizeof(avatar->gender),"%s",arfJsonString(arfJsonMember(metadata,"gender"),"unspecified"));
 
     if (arfJsonCount(arfJsonMember(structure,"assets"))==0)
     {
@@ -1560,7 +1562,7 @@ void arfPrintInfo(const struct arfAvatar *avatar)
 {
     if (avatar==0) { return; }
 
-    printf("avatar        : \"%s\" id=\"%s\"\n",avatar->name,avatar->id);
+    printf("avatar        : \"%s\" id=\"%s\" age=%d gender=\"%s\"\n",avatar->name,avatar->id,avatar->age,avatar->gender);
     printf("skeleton      : %u nodes, root=\"%s\"\n",avatar->numberOfNodes,avatar->nodes[avatar->rootNode].name);
     printf("mesh          : %u vertices, %u triangles\n",avatar->mesh.numberOfVertices,avatar->mesh.numberOfTriangles);
 

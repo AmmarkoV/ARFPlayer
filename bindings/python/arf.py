@@ -135,6 +135,8 @@ class _Avatar(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * MAX_NAME),
         ("id", ctypes.c_char * MAX_NAME),
+        ("age", ctypes.c_int),
+        ("gender", ctypes.c_char * MAX_NAME),
         ("numberOfNodes", ctypes.c_uint),
         ("nodes", ctypes.POINTER(_Node)),
         ("rootNode", ctypes.c_uint),
@@ -427,6 +429,14 @@ class Avatar:
     @property
     def id(self) -> str:
         return self._raw.id.decode("utf-8", "replace")
+
+    @property
+    def age(self) -> int:
+        return self._raw.age
+
+    @property
+    def gender(self) -> str:
+        return self._raw.gender.decode("utf-8", "replace")
 
     @property
     def node_count(self) -> int:

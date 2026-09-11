@@ -84,6 +84,8 @@ struct arfAvatar *arfCreate(unsigned int numberOfNodes,
 
     snprintf(avatar->name,sizeof(avatar->name),"%s","avatar");
     snprintf(avatar->id,sizeof(avatar->id),"%s","0");
+    avatar->age = -1; /* mandatory per spec, unknown -- see arf.h */
+    snprintf(avatar->gender,sizeof(avatar->gender),"%s","unspecified");
 
     avatar->numberOfNodes = numberOfNodes;
     avatar->nodes = (struct arfNode *) calloc(numberOfNodes,sizeof(struct arfNode));
@@ -581,6 +583,15 @@ static void arfJsonFloat(struct arfBuffer *buffer, float value)
     arfJsonText(buffer,text);
 }
 
+/** @brief Emit a signed integer -- metadata.age is the only signed number in
+ *  arf.json, since -1 stands for "unknown" (see arf.h). */
+static void arfJsonInt(struct arfBuffer *buffer, int value)
+{
+    char text[16];
+    snprintf(text,sizeof(text),"%d",value);
+    arfJsonText(buffer,text);
+}
+
 static void arfJsonUnsigned(struct arfBuffer *buffer, unsigned long long value)
 {
     char text[32];
@@ -624,16 +635,32 @@ static void arfWriteJson(struct arfBuffer *buffer, const struct arfAvatar *avata
 {
     arfJsonText(buffer,"{\n");
 
+    /* supportedAnimations is an object (SupportedAnimations schema), not a
+     * flat array of profile strings -- bodyAnimations/faceAnimations/
+     * landmarkAnimations are each an array of "one item per supported
+     * profile", so every array here has exactly one entry, this library only
+     * ever supporting one profile per modality. The spec suggests each entry
+     * "should be formatted as a URN"; this library keeps emitting its own
+     * plain arf-*-v1 profile names (the same ones AAU_CONFIG carries) rather
+     * than fabricate a URN scheme the spec text available here never
+     * actually defines -- see arf_format.h. */
     arfJsonText(buffer,"  \"preamble\": {\"signature\": \"" ARF_SIGNATURE "\", \"version\": \"" ARF_CONTAINER_VERSION
-                       "\", \"supportedAnimations\": [\"" ARF_PROFILE_BODY "\"");
-    if (avatar->hasFace)       { arfJsonText(buffer,", \"" ARF_PROFILE_FACE "\""); }
-    if (avatar->hasLandmarks)  { arfJsonText(buffer,", \"" ARF_PROFILE_LANDMARK "\""); }
-    arfJsonText(buffer,"]},\n");
+                       "\", \"supportedAnimations\": {\"bodyAnimations\": [\"" ARF_PROFILE_BODY "\"]");
+    if (avatar->hasFace)       { arfJsonText(buffer,", \"faceAnimations\": [\"" ARF_PROFILE_FACE "\"]"); }
+    if (avatar->hasLandmarks)  { arfJsonText(buffer,", \"landmarkAnimations\": [\"" ARF_PROFILE_LANDMARK "\"]"); }
+    arfJsonText(buffer,"}},\n");
 
+    /* age/gender are mandatory per the Metadata schema; this library has no
+     * real source for either (no producing pipeline field carries them), so
+     * they are honest placeholders -- see arf.h. */
     arfJsonText(buffer,"  \"metadata\": {\"name\": ");
     arfJsonQuoted(buffer,avatar->name);
     arfJsonText(buffer,", \"id\": ");
     arfJsonQuoted(buffer,avatar->id);
+    arfJsonText(buffer,", \"age\": ");
+    arfJsonInt(buffer,avatar->age);
+    arfJsonText(buffer,", \"gender\": ");
+    arfJsonQuoted(buffer,avatar->gender);
     arfJsonText(buffer,"},\n");
 
     /* structure.assets[].lods[] replaces the invented animationStreams field --

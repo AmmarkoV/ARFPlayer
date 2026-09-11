@@ -33,7 +33,12 @@
  *     (translation, rotation and uniform scale already baked in).  Do not also
  *     apply the node's rest translation/rotation when animating -- those exist
  *     only to draw the rest pose and for tooling.
- *   - Units are centimetres.
+ *   - Units are centimetres, NOT the metre ARF's General Conventions clause
+ *     names as its default -- a documented, deliberate deviation (this
+ *     library inherits centimetres from the original SAM3DBody-flavoured
+ *     design and nothing downstream, including the producing pipeline's own
+ *     tracker output, is in metres), not an oversight -- see
+ *     doc/CONFORMANCE_GAPS.md.
  *   - Rest rotations are quaternions in XYZW order, not WXYZ.
  *   - The producing pipeline flips Y and Z after skinning to get a
  *     camera-facing orientation.  That flip is NOT baked into the container,
@@ -171,6 +176,11 @@ struct arfAvatar
 {
     char name[ARF_MAX_NAME];
     char id[ARF_MAX_NAME];
+    int  age;                  /**< metadata.age, mandatory per spec; -1 means
+                                 *   unknown -- this library has no age source,
+                                 *   see doc/CONFORMANCE_GAPS.md */
+    char gender[ARF_MAX_NAME]; /**< metadata.gender, mandatory per spec;
+                                 *   "unspecified" when unknown, same caveat */
 
     unsigned int    numberOfNodes;
     struct arfNode *nodes;

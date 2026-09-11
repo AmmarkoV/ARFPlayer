@@ -377,8 +377,13 @@ class Avatar
             return bytes;
         };
 
-        this.name = document.metadata.name || 'avatar';
-        this.id   = document.metadata.id   || '0';
+        this.name   = document.metadata.name || 'avatar';
+        this.id     = document.metadata.id   || '0';
+        /* age/gender are mandatory in the Metadata schema; -1/'unspecified'
+         * mirror libarf's own "unknown" placeholders (see arf.h) for a
+         * container that omits them. */
+        this.age    = document.metadata.age !== undefined ? document.metadata.age : -1;
+        this.gender = document.metadata.gender || 'unspecified';
 
         /* -- skeleton --
          * The spec resolves every reference by id, not by array position

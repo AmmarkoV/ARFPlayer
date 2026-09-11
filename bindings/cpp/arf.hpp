@@ -233,6 +233,8 @@ public:
 
     std::string  name()           const { return avatar_->name; }
     std::string  id()             const { return avatar_->id;   }
+    int          age()            const noexcept { return avatar_->age; }
+    std::string  gender()         const { return avatar_->gender; }
     unsigned int node_count()     const noexcept { return avatar_->numberOfNodes; }
     unsigned int vertex_count()   const noexcept { return avatar_->mesh.numberOfVertices; }
     unsigned int triangle_count() const noexcept { return avatar_->mesh.numberOfTriangles; }

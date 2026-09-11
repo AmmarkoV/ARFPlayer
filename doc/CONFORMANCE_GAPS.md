@@ -9,9 +9,11 @@ Field names, types, and mandatory/optional status below are facts about the
 format and are stated plainly. Descriptions are paraphrased in this project's
 own words. No schema or bitstream-syntax text is quoted from ISO/IEC 23090-39;
 consistent with [`doc/ARF.md`](ARF.md), no specification text is reproduced
-here. The source used to compile this note is the FDIS-stage text as
-currently published at the MPEG ARF project site; treat clause/table numbers
-below as approximate pointers, not citations to a fixed page.
+here. The source used to compile this note is the draft text currently
+published at the MPEG ARF project site (its own title page marks it "CD
+stage," an earlier stage than this project previously assumed here); treat
+clause/table numbers below as approximate pointers, not citations to a fixed
+page, and expect fields to keep moving until the text reaches FDIS.
 
 This note has two audiences: whoever rewrites `libarf`, and the
 SAM3DBody-cpp maintainers, since `ARFWriter` is the thing that actually needs
@@ -31,9 +33,14 @@ have no real data source in this codebase (no landmark tracking, no
 textured avatars), so both were verified with synthetic round trips
 through the Python bindings rather than against a real sample -- see their
 sections for details. Sections below are marked `[done]` throughout now.
-The one remaining, deliberate deviation from the spec is the sparse
-skin-weight tensor (the spec only defines a dense one) -- a documented
-choice, not an oversight, see that section for why it stays that way.
+A later re-read against the spec text found two more gaps outside any of
+the milestones above -- `preamble.supportedAnimations`'s shape and
+`metadata.age`/`gender` being missing altogether -- both now fixed, see
+[`Preamble`/`Metadata`](#preamble--metadata-done). The two remaining,
+deliberate deviations from the spec are the sparse skin-weight tensor (the
+spec only defines a dense one) and centimetres as the unit (the spec names
+the metre as its default) -- both documented choices, not oversights, see
+their sections for why they stay that way.
 
 **Bug found and fixed after Milestone 1 shipped:** the General Conventions
 clause states plainly, "All references used in the ARF document are to the
@@ -52,6 +59,17 @@ remains a fully valid choice, just no longer a required one. AAU stream
 unaffected by this — they're positional into their own list by name and by
 design (a real-time binary stream doing id lookups per joint would be an odd
 choice), not document-level `id` references.
+
+**Two more gaps found on a later re-read against the spec text, both now
+fixed:** the "everything scoped in is implemented" status above turned out to
+still have two undocumented misses in `preamble`/`metadata`, neither flagged
+by the milestones above because neither was in scope at the time — see
+[`Preamble`/`Metadata`](#preamble--metadata-done) below for what changed and
+why. Re-reading against the spec also surfaced (but did not change) that this
+project's centimetre convention conflicts with the General Conventions
+clause's stated default unit (the metre) — see
+[Units: centimetres, not metres](#units-centimetres-not-metres-deliberate-deviation)
+below.
 
 ## Scope of this rewrite
 
@@ -86,7 +104,81 @@ choice), not document-level `id` references.
 ## Top-level document
 
 `preamble` / `metadata` / `structure` / `components` / `data` as the five
-top-level keys already matches. No change needed there.
+top-level keys matches. Two field-level gaps inside those two objects were
+missed by the milestones above (neither `preamble` nor `metadata` had its own
+scoped milestone) and are fixed now — see immediately below.
+
+## `Preamble` / `Metadata` `[done]`
+
+| field | status |
+|---|---|
+| `preamble.signature`, `preamble.version` | done, unchanged |
+| `preamble.supportedAnimations` | **was the wrong shape**, now fixed |
+| `metadata.name`, `metadata.id` | done, unchanged |
+| `metadata.age`, `metadata.gender` | **were missing entirely**, now added |
+
+`supportedAnimations` is a `SupportedAnimations` object in the schema —
+`bodyAnimations`/`faceAnimations`/`handAnimations`/`landmarkAnimations`/
+`proprietaryAnimations`, each an array of strings, none of them individually
+required — not the flat array of profile-name strings
+(`["arf-body-v1", "arf-face-v1", ...]`) this library used to write. Fixed in
+`arfWriteJson()` (`arf_writer.c`): each modality this avatar actually carries
+gets its own one-entry array (`bodyAnimations` always, `faceAnimations`/
+`landmarkAnimations` only when `hasFace`/`hasLandmarks`). The spec suggests
+each entry "should be formatted as a URN that includes an identifier of the
+framework..." but never actually defines a concrete URN scheme in the text
+available here, so this library keeps its own plain `arf-body-v1`/
+`arf-face-v1`/`arf-landmark-v1` profile names — the same strings
+`AAU_CONFIG.profile` already carries on the wire — rather than fabricate a
+URN grammar with nothing to base it on. Nothing parses this field back on
+read (`arf_reader.c`/`web/arf.js` never touched it before or after this fix),
+so this was a write-side-only defect: every container this library wrote had
+a `preamble.supportedAnimations` that would fail schema validation as a type
+mismatch (array where an object is required), even though this library's own
+reader never noticed.
+
+`metadata.age`/`metadata.gender` are mandatory (Metadata schema:
+`required: ["name", "id", "age", "gender"]`) and were absent from the data
+model entirely — not merely unfilled-in, `struct arfAvatar` (`arf.h`) had no
+field for either. Added: `int age` and `char gender[ARF_MAX_NAME]` alongside
+`name`/`id`, written and parsed in `arf_writer.c`/`arf_reader.c`, mirrored in
+`web/arf.js` and both bindings (the Python `ctypes` struct is a manual
+memory-layout mirror of `struct arfAvatar` — inserting fields there without
+updating `bindings/python/arf.py` in lockstep would have silently corrupted
+every field read after them). Like `Node.mapping`/`Mesh.path`, this library
+has no real source for either value (no field in the producing pipeline
+carries a tracked person's age or gender), so both are honest, documented
+placeholders rather than fabricated data: `age = -1` ("unknown", chosen over
+`0` specifically so it can't be misread as an age of zero), `gender =
+"unspecified"`. A real source, if one is ever wired up, would set these the
+same way `name`/`id` are already set today, by direct field assignment before
+`arfSave()` — there is no dedicated setter function for `name`/`id` either.
+
+## Units: centimetres, not metres `[decision made: staying centimetres]`
+
+The General Conventions clause states plainly that ARF "adopts the metre as
+the default unit of measurement." This library has used centimetres
+throughout since before the numeric-id rewrite — inherited unchanged from the
+original SAM3DBody-flavoured design — and nothing downstream agrees with the
+spec's default either: the producing pipeline's own tracker output is in
+centimetres, and nothing in this codebase (or, as far as this project has
+verified, in SAM3DBody-cpp) converts at any boundary.
+
+This was never flagged as a deviation anywhere in this project's own
+documentation prior to this re-read — every other SAM3DBody-flavoured choice
+this project keeps (the sparse skin-weight tensor, `Node.mapping`'s
+placeholder value, `TextureSet.materialPath`) is called out explicitly as a
+deliberate, documented deviation; units were the one thing stated as fact
+(`doc/ARF.md`'s "Units are centimetres") with no acknowledgment it disagrees
+with the spec at all.
+
+**Decided:** stay in centimetres, the same way the sparse skin-weight tensor
+stays sparse — converting at the read/write boundary is possible (scale every
+length-valued field by 0.01 on write, 100 on read) but nothing internal to
+this library needs it, and it would only matter the moment a real conformant
+reader or writer that assumes metres enters the picture. Revisit if that
+interop need ever comes up, the same trigger condition as the tensor
+decision above.
 
 ## Component id model `[done]`
 
@@ -476,6 +568,13 @@ pre-rewrite shape at all), so `ARFWriter` needs, concretely:
   `image/png`); `skins[0].textureSet` is the only link to add on the
   `Skin` side. See [TextureSet/TextureTarget](#textureset--texturetarget-done)
   for the exact JSON shape and the `animationInfo`/`materialPath` conventions
+* turn `preamble.supportedAnimations` from a flat array into the
+  `SupportedAnimations` object (`bodyAnimations`/`faceAnimations`/
+  `landmarkAnimations`, each an array of profile strings), and add
+  `metadata.age`/`metadata.gender` (mandatory, an integer and a string
+  respectively) — see [`Preamble`/`Metadata`](#preamble--metadata-done) for
+  the exact shape and this project's own placeholder values for the fields
+  it has no real source for
 
 Nothing is left "still open" on `ARFPlayer`'s side at this point — every
 item above is implemented and waiting for `ARFWriter` to match it.
